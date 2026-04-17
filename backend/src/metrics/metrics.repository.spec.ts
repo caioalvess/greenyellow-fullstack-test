@@ -192,9 +192,10 @@ describe('MetricsRepository (integracao real com Postgres)', () => {
   });
 
   describe('report', () => {
-    it('formata DateTime como DD/MM/YYYY e monta colunas aggDay/Month/Year', async () => {
+    it('retorna UMA linha POR LEITURA (nao agrupa por dia)', async () => {
       await seed(ds, [
         { metric_id: 100, date_time: '2023-11-10 08:00:00', value: 5 },
+        { metric_id: 100, date_time: '2023-11-10 20:00:00', value: 2 }, // mesmo dia
         { metric_id: 100, date_time: '2023-11-12 12:00:00', value: 3 },
         { metric_id: 100, date_time: '2023-12-01 10:00:00', value: 7 },
       ]);
@@ -203,51 +204,67 @@ describe('MetricsRepository (integracao real com Postgres)', () => {
         dateInitial: '2023-11-01',
         finalDate: '2023-12-31',
       });
+      // 4 leituras no DB, 4 rows no output
+      expect(rows).toHaveLength(4);
+      // cada row tem DateTime = data da leitura (YYYY-MM-DD)
+      expect(rows.map((r) => r.dateTime)).toEqual([
+        '2023-11-10',
+        '2023-11-10',
+        '2023-11-12',
+        '2023-12-01',
+      ]);
+      // aggDay: as 2 linhas do mesmo dia compartilham o valor (5+2=7).
+      // aggMonth: nov=10 (5+2+3), dez=7.
+      // aggYear: 2023=17 (5+2+3+7) em todas as linhas.
       expect(rows).toEqual([
-        { metricId: 100, dateTime: '10/11/2023', aggDay: 5, aggMonth: 8, aggYear: 15 },
-        { metricId: 100, dateTime: '12/11/2023', aggDay: 3, aggMonth: 8, aggYear: 15 },
-        { metricId: 100, dateTime: '01/12/2023', aggDay: 7, aggMonth: 7, aggYear: 15 },
+        { metricId: 100, dateTime: '2023-11-10', aggDay: 7, aggMonth: 10, aggYear: 17 },
+        { metricId: 100, dateTime: '2023-11-10', aggDay: 7, aggMonth: 10, aggYear: 17 },
+        { metricId: 100, dateTime: '2023-11-12', aggDay: 3, aggMonth: 10, aggYear: 17 },
+        { metricId: 100, dateTime: '2023-12-01', aggDay: 7, aggMonth: 7, aggYear: 17 },
       ]);
     });
 
-    it('multi-mes: aggMonth distingue meses, aggYear agrega todos', async () => {
+    it('range de datas e IGNORADO: linhas fora do range tambem aparecem', async () => {
+      // Enunciado mostra linhas fora do range (input Nov-Dez/2023, output c/ Jan/2024).
+      // O relatorio devolve o historico inteiro da metric.
       await seed(ds, [
-        { metric_id: 1, date_time: '2023-10-15 12:00:00', value: 5 },
-        { metric_id: 1, date_time: '2023-10-16 12:00:00', value: 3 },
+        { metric_id: 1, date_time: '2023-10-15 12:00:00', value: 50 },
         { metric_id: 1, date_time: '2023-11-10 08:00:00', value: 7 },
-        { metric_id: 1, date_time: '2023-11-12 08:00:00', value: 2 },
-      ]);
-      const rows = await repo.report({
-        metricId: 1,
-        dateInitial: '2023-10-01',
-        finalDate: '2023-11-30',
-      });
-      expect(rows).toEqual([
-        { metricId: 1, dateTime: '15/10/2023', aggDay: 5, aggMonth: 8, aggYear: 17 },
-        { metricId: 1, dateTime: '16/10/2023', aggDay: 3, aggMonth: 8, aggYear: 17 },
-        { metricId: 1, dateTime: '10/11/2023', aggDay: 7, aggMonth: 9, aggYear: 17 },
-        { metricId: 1, dateTime: '12/11/2023', aggDay: 2, aggMonth: 9, aggYear: 17 },
-      ]);
-    });
-
-    it('range-bound: aggYear conta apenas dias dentro do range requisitado', async () => {
-      // Esta e' a decisao documentada na Fase 5 — se um dia do ano esta' fora
-      // do range pedido, ele nao deve aparecer em aggYear.
-      await seed(ds, [
-        { metric_id: 1, date_time: '2023-10-15 12:00:00', value: 50 }, // FORA do range
-        { metric_id: 1, date_time: '2023-11-10 08:00:00', value: 7 },
-        { metric_id: 1, date_time: '2023-11-12 08:00:00', value: 2 },
+        { metric_id: 1, date_time: '2024-01-05 09:00:00', value: 3 },
       ]);
       const rows = await repo.report({
         metricId: 1,
         dateInitial: '2023-11-01',
         finalDate: '2023-11-30',
       });
-      // aggYear = 9 (7+2), NAO 59 (nao inclui o dia 15/10 que esta fora do range)
-      expect(rows.map((r) => r.aggYear)).toEqual([9, 9]);
+      expect(rows.map((r) => r.dateTime)).toEqual([
+        '2023-10-15',
+        '2023-11-10',
+        '2024-01-05',
+      ]);
+      // aggYear: 2023=57 (50+7), 2024=3. aggMonth: out=50, nov=7, jan/2024=3.
+      expect(rows).toEqual([
+        { metricId: 1, dateTime: '2023-10-15', aggDay: 50, aggMonth: 50, aggYear: 57 },
+        { metricId: 1, dateTime: '2023-11-10', aggDay: 7,  aggMonth: 7,  aggYear: 57 },
+        { metricId: 1, dateTime: '2024-01-05', aggDay: 3,  aggMonth: 3,  aggYear: 3 },
+      ]);
     });
 
-    it('retorna array vazio quando nao ha leituras no range', async () => {
+    it('isola por metric_id: leituras de outro metric nao aparecem', async () => {
+      await seed(ds, [
+        { metric_id: 1,   date_time: '2023-11-10 08:00:00', value: 5 },
+        { metric_id: 999, date_time: '2023-11-10 08:00:00', value: 99 }, // outro metric
+      ]);
+      const rows = await repo.report({
+        metricId: 1,
+        dateInitial: '2023-01-01',
+        finalDate: '2023-12-31',
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].aggDay).toBe(5);
+    });
+
+    it('retorna array vazio quando metric nao tem leituras', async () => {
       const rows = await repo.report({
         metricId: 999,
         dateInitial: '2020-01-01',

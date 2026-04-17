@@ -88,41 +88,50 @@ export class MetricsRepository {
     ]);
   }
 
+  /**
+   * Relatorio formato enunciado item 8.
+   *
+   * Shape: UMA linha POR LEITURA original (nao agrupa por dia). Colunas:
+   *   - metricId: id da metrica
+   *   - dateTime: data da leitura (YYYY-MM-DD)
+   *   - aggDay:   sum(value) do dia daquela leitura
+   *   - aggMonth: sum(value) do mes calendario daquela leitura
+   *   - aggYear:  sum(value) do ano calendario daquela leitura
+   *
+   * O range `dateInitial`/`finalDate` faz parte da assinatura por simetria
+   * com o aggregate endpoint, mas NAO filtra linhas no relatorio — o
+   * enunciado mostra datas fora do range nos exemplos (ex.: input Nov-Dez
+   * 2023 e output contendo 01/01/2024). O relatorio devolve o historico
+   * inteiro da metric com as agregacoes de cada leitura.
+   *
+   * Janelas com SUM(value) OVER (PARTITION BY metric, trunc_day/month/year)
+   * dao a mesma agregacao em cada linha do mesmo dia/mes/ano sem precisar
+   * de GROUP BY.
+   */
   async report(params: {
     metricId: number;
     dateInitial: string;
     finalDate: string;
   }): Promise<ReportRow[]> {
+    void params.dateInitial;
+    void params.finalDate;
     const sql = `
-      WITH daily AS (
-        SELECT
-          metric_id,
-          date_trunc('day', date_time)::date   AS day,
-          date_trunc('month', date_time)       AS month_trunc,
-          date_trunc('year', date_time)        AS year_trunc,
-          SUM(value)                           AS day_sum
-        FROM metric_readings
-        WHERE metric_id = $1
-          AND date_time >= $2::date
-          AND date_time <  ($3::date + INTERVAL '1 day')
-        GROUP BY metric_id,
-                 date_trunc('day', date_time),
-                 date_trunc('month', date_time),
-                 date_trunc('year', date_time)
-      )
       SELECT
-        metric_id                                                  AS "metricId",
-        to_char(day, 'DD/MM/YYYY')                                 AS "dateTime",
-        day_sum::int                                               AS "aggDay",
-        (SUM(day_sum) OVER (PARTITION BY month_trunc))::int        AS "aggMonth",
-        (SUM(day_sum) OVER (PARTITION BY year_trunc))::int         AS "aggYear"
-      FROM daily
-      ORDER BY day
+        metric_id                            AS "metricId",
+        to_char(date_time, 'YYYY-MM-DD')     AS "dateTime",
+        SUM(value) OVER (
+          PARTITION BY metric_id, date_trunc('day', date_time)
+        )::int                               AS "aggDay",
+        SUM(value) OVER (
+          PARTITION BY metric_id, date_trunc('month', date_time)
+        )::int                               AS "aggMonth",
+        SUM(value) OVER (
+          PARTITION BY metric_id, date_trunc('year', date_time)
+        )::int                               AS "aggYear"
+      FROM metric_readings
+      WHERE metric_id = $1
+      ORDER BY date_time
     `;
-    return this.dataSource.query(sql, [
-      params.metricId,
-      params.dateInitial,
-      params.finalDate,
-    ]);
+    return this.dataSource.query(sql, [params.metricId]);
   }
 }

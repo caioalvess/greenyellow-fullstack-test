@@ -10,11 +10,17 @@ export class RabbitMqHealthCheck {
   constructor(private readonly config: ConfigService) {}
 
   async check(): Promise<CheckResult> {
-    const host = this.config.get<string>('RABBITMQ_HOST', 'rabbitmq');
-    const port = this.config.get<number>('RABBITMQ_PORT', 5672);
-    const user = this.config.get<string>('RABBITMQ_USER');
-    const pass = this.config.get<string>('RABBITMQ_PASSWORD');
-    const url = `amqp://${user}:${pass}@${host}:${port}`;
+    // RABBITMQ_URL (ex.: CloudAMQP) tem prioridade sobre os campos individuais.
+    const fullUrl = this.config.get<string>('RABBITMQ_URL');
+    const url =
+      fullUrl ??
+      (() => {
+        const host = this.config.get<string>('RABBITMQ_HOST', 'rabbitmq');
+        const port = this.config.get<number>('RABBITMQ_PORT', 5672);
+        const user = this.config.get<string>('RABBITMQ_USER');
+        const pass = this.config.get<string>('RABBITMQ_PASSWORD');
+        return `amqp://${user}:${pass}@${host}:${port}`;
+      })();
 
     let conn: Awaited<ReturnType<typeof amqp.connect>> | undefined;
     try {

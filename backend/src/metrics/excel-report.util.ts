@@ -8,7 +8,7 @@ export async function buildReportWorkbook(rows: ReportRow[]): Promise<Buffer> {
   sheet.columns = [
     { header: 'MetricId', key: 'metricId', width: 12 },
     { header: 'DateTime', key: 'dateTime', width: 14 },
-    { header: 'AggDay',   key: 'aggDay',   width: 10 },
+    { header: 'Aggday',   key: 'aggDay',   width: 10 }, // "d" minusculo — enunciado
     { header: 'AggMonth', key: 'aggMonth', width: 12 },
     { header: 'AggYear',  key: 'aggYear',  width: 12 },
   ];

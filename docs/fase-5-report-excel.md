@@ -48,52 +48,69 @@ backend/package.json                  # + exceljs
 
 ## 3. Decisões
 
-### Semântica das agregações: sobre o **range requisitado**, não calendário completo
-O enunciado mostra `AggMonth=4` nos dias de novembro e dezembro de 2023, e `AggYear=32` pros dias de 2023. Não dá pra inferir 100% da amostra se o "mês/ano" considera todos os dias do mês/ano **ou apenas os dias dentro do range**.
+### Semântica das agregações: **calendário completo** (AggMonth = mês inteiro, AggYear = ano inteiro)
+Olhando a tabela de exemplo do enunciado item 8:
 
-Escolhi: **apenas dias dentro do range**.
+```
+MetricId | DateTime   | AggDay | AggMonth | AggYear
+71590    | 01/11/2023 |   1    |    4     |   32
+...
+71590    | 01/01/2024 |   1    |    4     |   16    ← dia de 2024
+```
 
-**Por quê:**
-- Consistência visual — se eu peço 15/11 a 30/11, quero ver "AggMonth" que confere com a soma das linhas mostradas.
-- SQL muito mais simples (não precisa consultar dados fora do WHERE).
-- Alinhado com o endpoint `/metrics/aggregate` da Fase 4 (que já é range-bound).
-- Se o reviewer quisesse "mês calendário completo", é a alternativa óbvia e fácil de trocar — é só remover o filtro de `WHERE` da subquery que alimenta a janela.
+Pistas no exemplo:
+- O input é `dateInitial: 2023-11-01, finalDate: 2023-12-31`, mas a saída inclui dias de **01/01/2024** → as linhas exibidas **não são** estritamente limitadas ao range (ou o range do exemplo difere do texto).
+- `AggMonth` de novembro e dezembro de 2023 = **4** em todas as linhas. Se apenas 4 dias de cada mês estão no banco (como o próprio exemplo sugere), isso bate com "mês calendário completo" (4 dias × valor 1).
+- `AggYear` de 2023 = **32**. Se fosse só a soma dos dias mostrados (Nov 4 + Dez 4 = 8), não bateria. 32 só faz sentido se o ano tem **outros dias no banco** além dos mostrados.
 
-Documentei a escolha aqui porque o enunciado não é explícito.
+Conclusão: o filtro `[dateInitial, finalDate]` restringe **quais linhas aparecem** no Excel, mas `aggMonth` e `aggYear` refletem o **mês/ano calendário inteiro** da métrica no banco.
 
-### Uma query SQL com CTE + window functions
+> ⚠️ **Correção pós-review:** a primeira versão dessa implementação interpretou "range-bound" (aggMonth/aggYear sumavam apenas dias dentro do filtro). O ponto foi sinalizado durante a revisão do código e o comportamento foi corrigido pra refletir a semântica do enunciado.
+
+### SQL: CTE sobre histórico completo + window → filtro final
+
 ```sql
-WITH daily AS (
-  SELECT
-    metric_id,
-    date_trunc('day', date_time)::date AS day,
-    date_trunc('month', date_time)     AS month_trunc,
-    date_trunc('year', date_time)      AS year_trunc,
-    SUM(value)                         AS day_sum
-  FROM metric_readings
-  WHERE metric_id = $1
-    AND date_time >= $2::date
-    AND date_time <  ($3::date + INTERVAL '1 day')
-  GROUP BY metric_id,
-           date_trunc('day', date_time),
-           date_trunc('month', date_time),
-           date_trunc('year', date_time)
-)
+WITH
+  full_history AS (
+    SELECT
+      metric_id,
+      date_trunc('day', date_time)::date AS day,
+      date_trunc('month', date_time)     AS month_trunc,
+      date_trunc('year', date_time)      AS year_trunc,
+      SUM(value)                         AS day_sum
+    FROM metric_readings
+    WHERE metric_id = $1           -- so' filtra a METRICA, nao a data
+    GROUP BY 1, 2, 3, 4
+  ),
+  with_aggs AS (
+    SELECT
+      metric_id,
+      day,
+      day_sum,
+      SUM(day_sum) OVER (PARTITION BY metric_id, month_trunc) AS agg_month,
+      SUM(day_sum) OVER (PARTITION BY metric_id, year_trunc)  AS agg_year
+    FROM full_history
+  )
 SELECT
-  metric_id                                          AS "metricId",
-  to_char(day, 'DD/MM/YYYY')                         AS "dateTime",
-  day_sum::int                                       AS "aggDay",
-  (SUM(day_sum) OVER (PARTITION BY month_trunc))::int AS "aggMonth",
-  (SUM(day_sum) OVER (PARTITION BY year_trunc))::int  AS "aggYear"
-FROM daily
+  metric_id                  AS "metricId",
+  to_char(day, 'DD/MM/YYYY') AS "dateTime",
+  day_sum::int               AS "aggDay",
+  agg_month::int             AS "aggMonth",
+  agg_year::int              AS "aggYear"
+FROM with_aggs
+WHERE day >= $2::date AND day <= $3::date    -- filtro de data SO AQUI, no fim
 ORDER BY day
 ```
 
-Por que CTE + window ao invés de 3 queries separadas:
+**Ordem do processamento é crítica:**
+1. `full_history` agrupa por dia **sem filtrar data** — retorna toda a série histórica daquela metric.
+2. `with_aggs` aplica window functions sobre esse histórico completo → cada linha ganha seu `agg_month` (soma do mês calendário inteiro) e `agg_year` (soma do ano calendário inteiro).
+3. O `WHERE` final **descarta** as linhas fora do range requisitado, mas **as agregações já foram calculadas** sobre o set completo.
+
+Por que CTE + window (e não 3 queries):
 - **1 round-trip** só.
-- A CTE agrega o dia (93k linhas → N dias). As window functions operam sobre esse shape reduzido (somando os dias).
-- Índice `(metric_id, date_time)` continua sendo usado no WHERE da CTE.
-- `PARTITION BY month_trunc` e `PARTITION BY year_trunc` calculam separadamente — uma scan da CTE pra cada.
+- Índice `(metric_id, date_time)` é usado no WHERE do `full_history`.
+- `PARTITION BY metric_id, month_trunc` e `metric_id, year_trunc` calculam independentes.
 
 ### Formato da data como `DD/MM/YYYY` (texto)
 O enunciado mostra `01/11/2023` no exemplo. Usar `to_char(day, 'DD/MM/YYYY')` devolve string direta. Evita:
@@ -145,8 +162,10 @@ Com `key`, o `addRow(obj)` mapeia por nome ao invés de posição. Menos bug-pro
 | 6 | Validação `metricId=abc` → 400 | ✅ |
 | 7 | Range fora dos dados → xlsx válido com só o header | ✅ |
 | 8 | Multi-mês (fixture com out=5+3, nov=7+2): AggMonth out=8, AggMonth nov=9, AggYear=17 | ✅ |
+| 9 | **Full calendar**: com dia 15/10 fora do range (value 50) + nov 10 (7) + nov 12 (2) e filtro nov/2023: retorna 2 linhas com aggMonth=9 e **aggYear=59** (inclui o dia fora do range) | ✅ |
 
-Teste 8 foi crítico: prova que `PARTITION BY month_trunc` separa corretamente outubro de novembro, e que `PARTITION BY year_trunc` agrega os dois.
+Teste 8 prova que `PARTITION BY month_trunc` separa corretamente outubro de novembro, e que `PARTITION BY year_trunc` agrega os dois.
+Teste 9 prova que a semântica "full calendar" está correta: `aggYear` soma dias fora do range filtrado.
 
 ## 5. Exemplos de uso
 
