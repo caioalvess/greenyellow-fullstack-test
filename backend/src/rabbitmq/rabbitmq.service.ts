@@ -78,6 +78,12 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildUrl(): string {
+    // Se RABBITMQ_URL (amqp/amqps completa) estiver setada, prioriza.
+    // Util pra servicos gerenciados como CloudAMQP que fornecem uma URL
+    // pronta com TLS + vhost (ex.: amqps://user:pass@host/vhost).
+    const fullUrl = this.config.get<string>('RABBITMQ_URL');
+    if (fullUrl) return fullUrl;
+
     const user = this.config.get<string>('RABBITMQ_USER');
     const pass = this.config.get<string>('RABBITMQ_PASSWORD');
     const host = this.config.get<string>('RABBITMQ_HOST', 'rabbitmq');

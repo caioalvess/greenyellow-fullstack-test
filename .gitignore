@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+infra/azure/.env
 
 # Node / build artifacts
 node_modules/
