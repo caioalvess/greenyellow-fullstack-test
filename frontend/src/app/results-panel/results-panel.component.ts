@@ -187,51 +187,67 @@ function isoToDow(iso: string): number {
         <div class="kpi hero">
           <div class="kpi-head">
             <span class="kpi-label">{{ i18n.t('results.kpi.total') }}</span>
-            <span class="kpi-sym" aria-hidden="true">Σ</span>
+            <span class="kpi-sym" aria-hidden="true">
+              <i class="pi pi-chart-bar"></i>
+            </span>
           </div>
           @if (store.loading()) {
             <p-skeleton width="7rem" height="1.8rem" />
-          } @else {
+          } @else if (hasData()) {
             <span class="kpi-value">{{ store.total() | number }}</span>
+          } @else {
+            <span class="kpi-value">—</span>
           }
         </div>
         <div class="kpi">
           <div class="kpi-head">
             <span class="kpi-label">{{ i18n.t('results.kpi.avg') }}</span>
-            <span class="kpi-sym" aria-hidden="true">μ</span>
+            <span class="kpi-sym" aria-hidden="true">
+              <i class="pi pi-chart-line"></i>
+            </span>
           </div>
           @if (store.loading()) {
             <p-skeleton width="5rem" height="1.6rem" />
-          } @else {
+          } @else if (hasData()) {
             <span class="kpi-value">{{ store.kpis().avg | number }}</span>
+          } @else {
+            <span class="kpi-value">—</span>
           }
         </div>
         <div class="kpi">
           <div class="kpi-head">
             <span class="kpi-label">{{ i18n.t('results.kpi.max') }}</span>
-            <span class="kpi-sym" aria-hidden="true">▲</span>
+            <span class="kpi-sym" aria-hidden="true">
+              <i class="pi pi-arrow-up"></i>
+            </span>
           </div>
           @if (store.loading()) {
             <p-skeleton width="5rem" height="1.6rem" />
-          } @else {
+          } @else if (hasData()) {
             <span class="kpi-value">{{ store.kpis().max | number }}</span>
             @if (store.kpis().maxDate) {
               <span class="kpi-footer">{{ store.kpis().maxDate }}</span>
             }
+          } @else {
+            <span class="kpi-value">—</span>
           }
         </div>
         <div class="kpi">
           <div class="kpi-head">
             <span class="kpi-label">{{ i18n.t('results.kpi.min') }}</span>
-            <span class="kpi-sym" aria-hidden="true">▼</span>
+            <span class="kpi-sym" aria-hidden="true">
+              <i class="pi pi-arrow-down"></i>
+            </span>
           </div>
           @if (store.loading()) {
             <p-skeleton width="5rem" height="1.6rem" />
-          } @else {
+          } @else if (hasData()) {
             <span class="kpi-value muted">{{ store.kpis().min | number }}</span>
             @if (store.kpis().minDate) {
               <span class="kpi-footer">{{ store.kpis().minDate }}</span>
             }
+          } @else {
+            <span class="kpi-value muted">—</span>
           }
         </div>
       </div>
@@ -629,21 +645,16 @@ function isoToDow(iso: string): number {
       .kpi-sym {
         width: 28px;
         height: 28px;
-        border-radius: 50%;
+        border-radius: 6px;
         background: rgba(255, 255, 255, 0.65);
         display: grid;
         place-items: center;
-        font-family: 'JetBrains Mono', 'Nunito', monospace;
-        font-size: 0.85rem;
-        font-weight: 700;
-        color: var(--gy-text);
+        color: var(--gy-text-soft);
         border: 1px solid rgba(0, 0, 0, 0.04);
       }
-      :root[data-theme='dark'] .kpi-sym {
-        background: rgba(255, 255, 255, 0.08);
-        color: var(--gy-text);
-        border-color: rgba(255, 255, 255, 0.08);
-      }
+      .kpi-sym i { font-size: 0.95rem; }
+      /* Override dark-mode de .kpi-sym vive em styles.scss global
+         pra fugir da view encapsulation do Angular. */
       .kpi-value {
         font-family: 'Nunito', sans-serif;
         font-weight: 800;
@@ -671,7 +682,7 @@ function isoToDow(iso: string): number {
       }
       .kpi.hero .kpi-label { color: rgba(31, 58, 10, 0.72); }
       .kpi.hero .kpi-sym {
-        background: #1F3A0A;
+        background: rgba(31, 58, 10, 0.92);
         color: #D7F14B;
         border-color: transparent;
       }
@@ -770,7 +781,7 @@ function isoToDow(iso: string): number {
         font-size: 0.8rem;
         box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
       }
-      :root[data-theme='dark'] .cc-title .cc-ico { color: var(--gy-green); }
+      /* Override dark-mode de .cc-ico vive em styles.scss global. */
       .cc-meta {
         display: inline-flex;
         align-items: center;
@@ -971,6 +982,7 @@ export class ResultsPanelComponent implements OnInit, OnDestroy {
   }
 
   readonly pointsCount = computed(() => this.store.data().length);
+  readonly hasData = computed(() => this.store.data().length > 0);
   readonly pointsLabel = computed(() => {
     const n = this.pointsCount();
     const key = n === 1 ? 'results.header.points.one' : 'results.header.points';

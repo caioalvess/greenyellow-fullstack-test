@@ -518,3 +518,18 @@ h1, h2, h3, h4, h5, h6 {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Dark-mode overrides para ícones dos cards. Precisam viver aqui (e
+   nao no component CSS) porque a view encapsulation do Angular nao
+   deixa `:root[data-theme='dark'] .kpi-sym` vencer a regra base da
+   propria classe dentro do componente. */
+:root[data-theme='dark'] .kpi-sym {
+  background: #1F3A0A;
+  color: #D7F14B;
+  border-color: transparent;
+}
+:root[data-theme='dark'] .cc-title .cc-ico {
+  background: #1F3A0A;
+  color: #D7F14B;
+  box-shadow: none;
+}

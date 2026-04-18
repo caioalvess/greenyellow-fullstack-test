@@ -32,7 +32,6 @@ import { I18nService } from './i18n/i18n.service';
         <app-filters-panel />
 
         <div class="signature">
-          <div class="sig-avatar">CA</div>
           <div class="sig-info">
             <div class="sig-name">Caio Alves</div>
             <div class="sig-meta">full-stack · {{ year }}</div>
@@ -159,21 +158,6 @@ import { I18nService } from './i18n/i18n.service';
       .sidebar > app-filters-panel {
         margin-bottom: auto;
       }
-      .sig-avatar {
-        width: 34px;
-        height: 34px;
-        border-radius: 50%;
-        background: linear-gradient(135deg, var(--gy-green) 0%, var(--gy-green-dark) 100%);
-        color: #fff;
-        font-family: 'Nunito', sans-serif;
-        font-weight: 800;
-        font-size: 0.74rem;
-        display: grid;
-        place-items: center;
-        letter-spacing: 0.02em;
-        box-shadow: 0 3px 8px rgba(38, 100, 0, 0.2);
-        flex: 0 0 34px;
-      }
       .sig-info {
         flex: 1;
         min-width: 0;
@@ -199,7 +183,7 @@ import { I18nService } from './i18n/i18n.service';
         width: 30px;
         height: 30px;
         border-radius: 6px;
-        color: var(--gy-text-soft);
+        color: var(--gy-green);
         display: grid;
         place-items: center;
         text-decoration: none;

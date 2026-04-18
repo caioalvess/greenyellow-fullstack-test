@@ -10,11 +10,16 @@
 
 export type Locale = 'pt' | 'en' | 'es' | 'fr';
 
-export const LOCALES: ReadonlyArray<{ code: Locale; label: string; bcp47: string }> = [
-  { code: 'pt', label: 'Português', bcp47: 'pt-BR' },
-  { code: 'en', label: 'English',   bcp47: 'en-US' },
-  { code: 'es', label: 'Español',   bcp47: 'es-ES' },
-  { code: 'fr', label: 'Français',  bcp47: 'fr-FR' },
+export const LOCALES: ReadonlyArray<{
+  code: Locale;
+  label: string;
+  bcp47: string;
+  flag: string;
+}> = [
+  { code: 'pt', label: 'Português', bcp47: 'pt-BR', flag: '🇧🇷' },
+  { code: 'en', label: 'English',   bcp47: 'en-US', flag: '🇺🇸' },
+  { code: 'es', label: 'Español',   bcp47: 'es-ES', flag: '🇪🇸' },
+  { code: 'fr', label: 'Français',  bcp47: 'fr-FR', flag: '🇫🇷' },
 ];
 
 export const TRANSLATIONS: Record<Locale, Record<string, string>> = {

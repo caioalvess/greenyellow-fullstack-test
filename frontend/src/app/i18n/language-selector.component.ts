@@ -2,6 +2,7 @@ import {
   Component,
   ElementRef,
   HostListener,
+  computed,
   inject,
   signal,
 } from '@angular/core';
@@ -25,10 +26,10 @@ import { Locale } from './translations';
       [attr.aria-label]="i18n.t('header.lang.aria')"
       [attr.aria-haspopup]="true"
       [attr.aria-expanded]="open()"
-      [attr.title]="i18n.t('header.lang.title')"
+      [attr.title]="currentLabel()"
       (click)="toggle($event)"
     >
-      <span class="code">{{ i18n.locale().toUpperCase() }}</span>
+      <span class="flag" aria-hidden="true">{{ currentFlag() }}</span>
       <i class="pi pi-angle-down chev" aria-hidden="true"></i>
     </button>
 
@@ -42,7 +43,7 @@ import { Locale } from './translations';
             [class.active]="i18n.locale() === loc.code"
             (click)="pick(loc.code)"
           >
-            <span class="menu-code">{{ loc.code.toUpperCase() }}</span>
+            <span class="menu-flag" aria-hidden="true">{{ loc.flag }}</span>
             <span class="menu-label">{{ loc.label }}</span>
             @if (i18n.locale() === loc.code) {
               <i class="pi pi-check menu-check" aria-hidden="true"></i>
@@ -78,7 +79,7 @@ import { Locale } from './translations';
         color: var(--gy-green-dark);
       }
       :root[data-theme='dark'] .lang-btn:hover { color: var(--gy-green); }
-      .lang-btn .code { font-variant-numeric: tabular-nums; }
+      .lang-btn .flag { font-size: 1.05rem; line-height: 1; }
       .lang-btn .chev { font-size: 0.7rem; opacity: 0.75; }
 
       .menu {
@@ -122,18 +123,13 @@ import { Locale } from './translations';
         font-weight: 700;
       }
       :root[data-theme='dark'] .menu-item.active { color: var(--gy-green); }
-      .menu-code {
+      .menu-flag {
+        font-size: 1.05rem;
+        line-height: 1;
         display: inline-block;
-        min-width: 2ch;
-        font-weight: 800;
-        font-size: 0.72rem;
-        letter-spacing: 0.05em;
-        color: var(--gy-text-soft);
+        width: 1.4em;
+        text-align: center;
       }
-      .menu-item.active .menu-code {
-        color: var(--gy-green-dark);
-      }
-      :root[data-theme='dark'] .menu-item.active .menu-code { color: var(--gy-green); }
       .menu-label { flex: 1; font-size: 0.85rem; }
       .menu-check { font-size: 0.75rem; color: var(--gy-green); }
     `,
@@ -143,6 +139,13 @@ export class LanguageSelectorComponent {
   readonly i18n = inject(I18nService);
   private readonly host = inject(ElementRef<HTMLElement>);
   readonly open = signal(false);
+
+  readonly currentFlag = computed(
+    () => this.i18n.available.find((l) => l.code === this.i18n.locale())?.flag ?? '',
+  );
+  readonly currentLabel = computed(
+    () => this.i18n.available.find((l) => l.code === this.i18n.locale())?.label ?? '',
+  );
 
   toggle(ev: MouseEvent): void {
     ev.stopPropagation();
