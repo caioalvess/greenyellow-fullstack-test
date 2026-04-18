@@ -84,7 +84,7 @@ docker compose down -v    # reseta tudo, inclusive banco
 - **Banco:** PostgreSQL 16 — entidades via TypeORM, **queries em SQL puro** (como o enunciado pediu)
 - **Fila:** RabbitMQ 3 via `amqplib` direto
 - **Storage:** Azurite em dev, Azure Blob Storage real em prod (mesma connection string, zero mudança de código)
-- **Frontend:** Angular 17 + PrimeNG 17 (fonte Nunito, tema custom com paleta da GreenYellow, dark mode)
+- **Frontend:** Angular 17 + PrimeNG 17 (fonte Nunito, tema custom com paleta da GreenYellow, dark mode, gráficos com **Chart.js**, **i18n** pt-BR/en/es/fr via signals)
 - **Testes:** Jest no back (unit + integração real + E2E com Supertest) e no front (jest-preset-angular + jsdom)
 - **Infra:** Docker Compose em dev; Azure Container Apps em prod
 

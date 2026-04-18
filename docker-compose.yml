@@ -149,6 +149,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # ============================================================
+  # E2E (Playwright) — one-shot, so' sobe com --profile e2e.
+  #   docker compose --profile e2e run --rm --no-deps e2e
+  # Premissa: `gy-frontend` ja' esta no ar (docker compose up -d).
+  # Usa network_mode: host pra resolver http://localhost:4200 direto,
+  # sem precisar compartilhar network do compose nem DNS interno.
+  # A imagem oficial do Playwright ja' traz os browsers instalados.
+  # ============================================================
+  e2e:
+    profiles: ["e2e"]
+    image: mcr.microsoft.com/playwright:v1.59.1-noble
+    container_name: gy-e2e
+    working_dir: /app
+    network_mode: host
+    volumes:
+      - ./frontend:/app
+    environment:
+      PLAYWRIGHT_BASE_URL: http://localhost:4200
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    command: >
+      sh -c "
+        npm install --no-save --no-audit --no-fund @playwright/test@^1.59.1 &&
+        npx playwright test
+      "
+
 volumes:
   backend_node_modules:
   frontend_node_modules:

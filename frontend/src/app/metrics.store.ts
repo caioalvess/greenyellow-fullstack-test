@@ -3,9 +3,19 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subscription, catchError, of, switchMap, timer } from 'rxjs';
 import { MessageService } from 'primeng/api';
 import { ApiService } from './api.service';
-import { extractCsvMeta } from './csv-meta.util';
+import { CsvMeta, extractCsvMeta } from './csv-meta.util';
 import { formatNumber } from './format.util';
+import { I18nService } from './i18n/i18n.service';
 import { AggregatedPoint, Granularity, UploadStatus } from './models';
+
+/**
+ * Arquivo CSV escolhido pelo user aguardando confirmação para upload.
+ * Meta e' extraida inline antes de exibir a preview.
+ */
+export interface PendingCsv {
+  file: File;
+  meta: CsvMeta;
+}
 
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 120_000;
@@ -35,6 +45,11 @@ export class MetricsStore {
   readonly lastUpload = signal<UploadedFileMeta | null>(null);
   readonly uploading = signal(false);
   readonly uploadStatus = signal<UploadStatus | null>(null);
+  /**
+   * Arquivo CSV aguardando confirmacao do usuario antes do upload.
+   * null quando o drop-zone esta em estado "vazio", "enviando" ou "enviado".
+   */
+  readonly pendingCsv = signal<PendingCsv | null>(null);
   private pollSub?: Subscription;
 
   // Results state
@@ -46,6 +61,37 @@ export class MetricsStore {
   readonly total = computed(() =>
     this.data().reduce((acc, r) => acc + (r.value ?? 0), 0),
   );
+  /**
+   * KPIs derivados da serie devolvida pelo /aggregate. Sao memorizados
+   * como uma unica struct (em vez de 4 computeds separados) pra evitar
+   * varrer `data()` 4x a cada mudanca — um unico reduce alimenta todos.
+   * Vazio quando data() esta vazio (null nos pontos de pico/minimo) pra
+   * a UI saber exibir placeholder em vez de `-Infinity`.
+   */
+  readonly kpis = computed(() => {
+    const rows = this.data();
+    if (rows.length === 0) {
+      return { avg: 0, max: 0, min: 0, maxDate: null, minDate: null };
+    }
+    let sum = 0;
+    let max = rows[0].value;
+    let min = rows[0].value;
+    let maxDate = rows[0].date;
+    let minDate = rows[0].date;
+    for (const r of rows) {
+      const v = r.value ?? 0;
+      sum += v;
+      if (v > max) { max = v; maxDate = r.date; }
+      if (v < min) { min = v; minDate = r.date; }
+    }
+    return {
+      avg: Math.round(sum / rows.length),
+      max,
+      min,
+      maxDate,
+      minDate,
+    };
+  });
   readonly isFormValid = computed(
     () =>
       this.metricId() !== null &&
@@ -74,6 +120,7 @@ export class MetricsStore {
 
   private readonly api = inject(ApiService);
   private readonly messages = inject(MessageService);
+  private readonly i18n = inject(I18nService);
   private readonly destroyRef = inject(DestroyRef);
 
   consultar(): void {
@@ -97,7 +144,7 @@ export class MetricsStore {
           this.loading.set(false);
           this.messages.add({
             severity: 'error',
-            summary: 'Falha na consulta',
+            summary: this.i18n.t('toast.consult.error.title'),
             detail: this.extractError(err),
             life: 7000,
           });
@@ -115,21 +162,58 @@ export class MetricsStore {
     window.location.href = url;
     this.messages.add({
       severity: 'info',
-      summary: 'Gerando relatório',
-      detail: 'O download do Excel deve iniciar em instantes.',
+      summary: this.i18n.t('toast.report.info.title'),
+      detail: this.i18n.t('toast.report.info.detail'),
       life: 4000,
     });
   }
 
   /**
-   * Entrada unica pra um arquivo CSV vindo da UI (dropzone ou file picker):
-   * valida extensao, dispara o prefill do form a partir dos metadados
-   * do CSV em paralelo (best-effort) e inicia o upload.
+   * Entrada unica pra um arquivo CSV vindo da UI (dropzone ou file picker).
+   *
+   * Novo fluxo com preview: em vez de disparar upload automaticamente,
+   * extrai meta do CSV e guarda em `pendingCsv` — a UI renderiza uma
+   * preview com MetricId/range detectados pro user confirmar. Se a
+   * extracao falhar (CSV malformado), pendingCsv ainda é setado com
+   * meta vazia — o user pode confirmar mesmo assim (ex.: CSV valido
+   * com layout diferente do nosso detector) e o backend sera a fonte
+   * de verdade.
    */
-  acceptCsvFile(file: File): void {
+  async acceptCsvFile(file: File): Promise<void> {
     if (!file.name.toLowerCase().endsWith('.csv')) return;
-    this.prefillFromFile(file).catch(() => undefined);
+    let meta: CsvMeta;
+    try {
+      meta = await extractCsvMeta(file);
+    } catch {
+      meta = { metricId: null, firstDate: null, lastDate: null };
+    }
+    this.pendingCsv.set({ file, meta });
+  }
+
+  /**
+   * Confirma o upload do pendingCsv: aplica o prefill (metricId + datas)
+   * e inicia o upload real. Chamado pelo botao "Enviar" da preview.
+   */
+  confirmPendingUpload(): void {
+    const pending = this.pendingCsv();
+    if (!pending) return;
+    const { file, meta } = pending;
+    if (meta.metricId !== null && meta.firstDate && meta.lastDate) {
+      this.prefillFromMeta({
+        metricId: meta.metricId,
+        firstDate: meta.firstDate,
+        lastDate: meta.lastDate,
+      });
+    }
+    this.pendingCsv.set(null);
     this.uploadCsv(file);
+  }
+
+  /**
+   * Descarta o CSV em preview sem enviar. UI volta pro estado vazio.
+   */
+  cancelPendingUpload(): void {
+    this.pendingCsv.set(null);
   }
 
   uploadCsv(file: File): void {
@@ -147,8 +231,10 @@ export class MetricsStore {
         });
         this.messages.add({
           severity: 'success',
-          summary: 'Upload concluído',
-          detail: `${res.originalName} enviado. Processando…`,
+          summary: this.i18n.t('toast.upload.success.title'),
+          detail: this.i18n.t('toast.upload.success.detail', {
+            name: res.originalName,
+          }),
           life: 4000,
         });
         this.startPolling(res.blobName);
@@ -157,7 +243,7 @@ export class MetricsStore {
         this.uploading.set(false);
         this.messages.add({
           severity: 'error',
-          summary: 'Falha no upload',
+          summary: this.i18n.t('toast.upload.error.title'),
           detail: this.extractError(err),
           life: 7000,
         });
@@ -192,9 +278,8 @@ export class MetricsStore {
           this.stopPolling();
           this.messages.add({
             severity: 'warn',
-            summary: 'Processamento demorado',
-            detail:
-              'Ainda não concluído após 2 minutos. Tente recarregar a página ou faça novo upload.',
+            summary: this.i18n.t('toast.process.slow.title'),
+            detail: this.i18n.t('toast.process.slow.detail'),
             life: 8000,
           });
           return;
@@ -205,16 +290,18 @@ export class MetricsStore {
           this.stopPolling();
           this.messages.add({
             severity: 'success',
-            summary: 'Processamento concluído',
-            detail: `${formatNumber(status.rowsProcessed)} linhas indexadas.`,
+            summary: this.i18n.t('toast.process.success.title'),
+            detail: this.i18n.t('toast.process.success.detail', {
+              count: formatNumber(status.rowsProcessed),
+            }),
             life: 4000,
           });
         } else if (status.state === 'failed') {
           this.stopPolling();
           this.messages.add({
             severity: 'error',
-            summary: 'Falha no processamento',
-            detail: status.error ?? 'Erro desconhecido.',
+            summary: this.i18n.t('toast.process.failed.title'),
+            detail: status.error ?? this.i18n.t('toast.process.unknownError'),
             life: 8000,
           });
         }
@@ -224,17 +311,6 @@ export class MetricsStore {
   private stopPolling(): void {
     this.pollSub?.unsubscribe();
     this.pollSub = undefined;
-  }
-
-  private async prefillFromFile(file: File): Promise<void> {
-    const meta = await extractCsvMeta(file);
-    if (meta.metricId !== null && meta.firstDate && meta.lastDate) {
-      this.prefillFromMeta({
-        metricId: meta.metricId,
-        firstDate: meta.firstDate,
-        lastDate: meta.lastDate,
-      });
-    }
   }
 
   prefillFromMeta(meta: {
@@ -260,7 +336,7 @@ export class MetricsStore {
     if (removed) {
       this.messages.add({
         severity: 'info',
-        summary: 'Arquivo removido',
+        summary: this.i18n.t('toast.upload.removed.title'),
         detail: removed.originalName,
         life: 3000,
       });
@@ -281,6 +357,8 @@ export class MetricsStore {
     const msg = err?.error?.message;
     if (Array.isArray(msg)) return msg.join('; ');
     if (typeof msg === 'string') return msg;
-    return `Erro na requisição (HTTP ${err?.status ?? '?'})`;
+    return this.i18n.t('toast.consult.error.httpFallback', {
+      status: err?.status ?? '?',
+    });
   }
 }

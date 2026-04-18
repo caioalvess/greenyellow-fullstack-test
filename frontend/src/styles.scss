@@ -318,18 +318,13 @@ h1, h2, h3, h4, h5, h6 {
   100% { transform: translateX(400%); }
 }
 
-/* Stagger fade-in das linhas — apenas opacity pra nao mexer em layout/scroll */
+/* Fade-in discreto das linhas — sem stagger pra nao arrastar */
 .gy-table .p-datatable-tbody > tr {
-  animation: gy-row-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: gy-row-in 160ms ease-out both;
 }
 @keyframes gy-row-in {
   from { opacity: 0; }
   to   { opacity: 1; }
-}
-@for $i from 1 through 20 {
-  .gy-table .p-datatable-tbody > tr:nth-child(#{$i}) {
-    animation-delay: #{($i - 1) * 40}ms;
-  }
 }
 
 .p-toast .p-toast-message {

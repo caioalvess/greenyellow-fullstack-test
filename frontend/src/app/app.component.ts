@@ -4,17 +4,24 @@ import { FiltersPanelComponent } from './filters-panel/filters-panel.component';
 import { ResultsPanelComponent } from './results-panel/results-panel.component';
 import { MetricsStore } from './metrics.store';
 import { ThemeService } from './theme.service';
+import { I18nService } from './i18n/i18n.service';
+import { LanguageSelectorComponent } from './i18n/language-selector.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [ToastModule, FiltersPanelComponent, ResultsPanelComponent],
+  imports: [
+    ToastModule,
+    FiltersPanelComponent,
+    ResultsPanelComponent,
+    LanguageSelectorComponent,
+  ],
   template: `
     <p-toast position="top-right" />
 
     <header class="gy-header" role="banner">
       <div class="gy-header-inner">
-        <a class="brand" href="/" aria-label="GreenYellow — ir para inicio">
+        <a class="brand" href="/" [attr.aria-label]="i18n.t('header.brand.aria')">
           <img
             src="assets/logo.svg"
             alt="GreenYellow"
@@ -23,7 +30,7 @@ import { ThemeService } from './theme.service';
             height="48"
           />
           <span class="brand-divider" aria-hidden="true"></span>
-          <span class="brand-sub">Plataforma de Métricas</span>
+          <span class="brand-sub">{{ i18n.t('header.brand.subtitle') }}</span>
         </a>
 
         <div class="header-right">
@@ -33,17 +40,20 @@ import { ThemeService } from './theme.service';
               {{ label }}
             }
           </span>
+          <app-language-selector />
           <button
             type="button"
             class="theme-toggle"
             (click)="theme.toggle()"
             [attr.aria-label]="
               theme.theme() === 'dark'
-                ? 'Mudar para tema claro'
-                : 'Mudar para tema escuro'
+                ? i18n.t('header.theme.toLight')
+                : i18n.t('header.theme.toDark')
             "
             [attr.title]="
-              theme.theme() === 'dark' ? 'Tema claro' : 'Tema escuro'
+              theme.theme() === 'dark'
+                ? i18n.t('header.theme.light')
+                : i18n.t('header.theme.dark')
             "
           >
             <i
@@ -73,20 +83,22 @@ import { ThemeService } from './theme.service';
         <div class="brand-mini">
           <span class="status-dot" aria-hidden="true"></span>
           <span class="brand-line">
-            GreenYellow · <span class="muted">Plataforma de Métricas</span>
+            GreenYellow · <span class="muted">{{ i18n.t('header.brand.subtitle') }}</span>
           </span>
         </div>
         <div class="stack">
-          <span class="stack-label">feito com</span>
+          <span class="stack-label">{{ i18n.t('footer.madeWith') }}</span>
           <span class="pill">Angular</span>
           <span class="pill">NestJS</span>
           <span class="pill">Postgres</span>
           <span class="pill">RabbitMQ</span>
           <span class="pill">Docker</span>
+          <span class="pill">Chart.js</span>
+          <span class="pill">i18n</span>
         </div>
         <div class="credit">
           <span>© {{ year }} · Caio Alves</span>
-          <span class="rights">Todos os direitos reservados</span>
+          <span class="rights">{{ i18n.t('footer.rights') }}</span>
         </div>
       </div>
     </footer>
@@ -303,11 +315,12 @@ import { ThemeService } from './theme.service';
 export class AppComponent {
   readonly store = inject(MetricsStore);
   readonly theme = inject(ThemeService);
+  readonly i18n = inject(I18nService);
   readonly year = new Date().getFullYear();
 
   readonly lastUploadLabel = computed(() => {
     const up = this.store.lastUpload();
     if (!up) return null;
-    return `último upload: ${up.originalName}`;
+    return this.i18n.t('header.lastUpload', { name: up.originalName });
   });
 }

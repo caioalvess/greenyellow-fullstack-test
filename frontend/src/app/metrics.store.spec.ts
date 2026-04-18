@@ -3,6 +3,7 @@ import { Subject, of, throwError } from 'rxjs';
 import { MessageService } from 'primeng/api';
 import { ApiService } from './api.service';
 import { MetricsStore } from './metrics.store';
+import { I18nService } from './i18n/i18n.service';
 import { UploadStatus, UploadState } from './models';
 
 // Helper pra montar UploadStatus sem precisar setar blobName/error em todo lugar.
@@ -38,6 +39,10 @@ describe('MetricsStore', () => {
         { provide: MessageService, useValue: messages },
       ],
     });
+    // Fixa o idioma em pt-BR pras asserções baterem com as strings
+    // canônicas do dicionário — `navigator.language` no jsdom pode variar
+    // e cair em outro idioma no readInitial().
+    TestBed.inject(I18nService).setLocale('pt');
     store = TestBed.inject(MetricsStore);
   });
 
@@ -102,20 +107,109 @@ describe('MetricsStore', () => {
     });
   });
 
+  describe('kpis', () => {
+    it('zera quando data() esta vazio (sem -Infinity nos maximos)', () => {
+      expect(store.kpis()).toEqual({
+        avg: 0, max: 0, min: 0, maxDate: null, minDate: null,
+      });
+    });
+
+    it('devolve avg/max/min + datas de pico e mínimo', () => {
+      store.data.set([
+        { date: '2024-01-01', value: 10 },
+        { date: '2024-01-02', value: 40 }, // pico
+        { date: '2024-01-03', value: 5 },  // mínimo
+        { date: '2024-01-04', value: 25 },
+      ]);
+      expect(store.kpis()).toEqual({
+        avg: 20, // (10+40+5+25)/4 = 20
+        max: 40,
+        min: 5,
+        maxDate: '2024-01-02',
+        minDate: '2024-01-03',
+      });
+    });
+
+    it('quando ha empate no pico, mantem a primeira ocorrencia', () => {
+      store.data.set([
+        { date: '2024-01-01', value: 10 },
+        { date: '2024-01-02', value: 10 },
+      ]);
+      expect(store.kpis().maxDate).toBe('2024-01-01');
+      expect(store.kpis().minDate).toBe('2024-01-01');
+    });
+  });
+
   // ------------------------------------------------------------------
   // acceptCsvFile
   // ------------------------------------------------------------------
   describe('acceptCsvFile', () => {
-    it('ignora arquivos que nao sao .csv', () => {
-      store.acceptCsvFile(new File(['x'], 'foo.txt'));
+    it('ignora arquivos que nao sao .csv', async () => {
+      await store.acceptCsvFile(new File(['x'], 'foo.txt'));
+      expect(store.pendingCsv()).toBeNull();
       expect(api.uploadCsv).not.toHaveBeenCalled();
     });
 
-    it('aceita .csv e .CSV (case insensitive)', () => {
+    it('aceita .csv e .CSV (case insensitive) — seta pendingCsv sem enviar', async () => {
+      await store.acceptCsvFile(new File(['x'], 'data.csv'));
+      expect(store.pendingCsv()?.file.name).toBe('data.csv');
+      await store.acceptCsvFile(new File(['x'], 'DATA.CSV'));
+      expect(store.pendingCsv()?.file.name).toBe('DATA.CSV');
+      // upload so' acontece quando confirmPendingUpload e' chamado
+      expect(api.uploadCsv).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pending upload (preview)', () => {
+    it('confirmPendingUpload: aplica prefill e inicia upload', () => {
       api.uploadCsv.mockReturnValue(new Subject());
-      store.acceptCsvFile(new File(['x'], 'data.csv'));
-      store.acceptCsvFile(new File(['x'], 'DATA.CSV'));
-      expect(api.uploadCsv).toHaveBeenCalledTimes(2);
+      store.pendingCsv.set({
+        file: new File(['x'], 'data.csv'),
+        meta: {
+          metricId: 42,
+          firstDate: new Date(2024, 0, 1),
+          lastDate: new Date(2024, 0, 31),
+        },
+      });
+
+      store.confirmPendingUpload();
+
+      expect(store.metricId()).toBe(42);
+      expect(store.dateInitial()?.getDate()).toBe(1);
+      expect(store.finalDate()?.getDate()).toBe(31);
+      expect(store.pendingCsv()).toBeNull();
+      expect(api.uploadCsv).toHaveBeenCalled();
+    });
+
+    it('confirmPendingUpload: meta vazia nao sobrescreve o form atual', () => {
+      api.uploadCsv.mockReturnValue(new Subject());
+      store.metricId.set(77);
+      store.pendingCsv.set({
+        file: new File(['x'], 'data.csv'),
+        meta: { metricId: null, firstDate: null, lastDate: null },
+      });
+
+      store.confirmPendingUpload();
+
+      expect(store.metricId()).toBe(77);
+      expect(api.uploadCsv).toHaveBeenCalled();
+    });
+
+    it('confirmPendingUpload: no-op quando nao ha pending', () => {
+      store.confirmPendingUpload();
+      expect(api.uploadCsv).not.toHaveBeenCalled();
+    });
+
+    it('cancelPendingUpload: zera pendingCsv sem chamar API', () => {
+      store.pendingCsv.set({
+        file: new File(['x'], 'data.csv'),
+        meta: { metricId: null, firstDate: null, lastDate: null },
+      });
+
+      store.cancelPendingUpload();
+
+      expect(store.pendingCsv()).toBeNull();
+      expect(api.uploadCsv).not.toHaveBeenCalled();
     });
   });
 
