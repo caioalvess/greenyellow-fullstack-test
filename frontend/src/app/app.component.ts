@@ -124,7 +124,7 @@ import { LanguageSelectorComponent } from './i18n/language-selector.component';
       .gy-header-inner {
         max-width: 1240px;
         margin: 0 auto;
-        padding: 0.55rem 1.25rem;
+        padding: 1rem 1.25rem;
         display: flex;
         align-items: center;
         justify-content: space-between;
