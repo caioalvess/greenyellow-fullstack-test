@@ -290,6 +290,18 @@ describe('MetricsStore', () => {
       expect(store.isStale()).toBe(false);
     });
 
+    it('false quando ha lastQuery mas data vazio (consulta nao trouxe nada)', () => {
+      // Cenario: lastQuery restaurada do localStorage mas DB foi limpo,
+      // aggregate devolveu []. Sem dado em tela, sem "consulta" pra
+      // desatualizar — mesmo se lastUpload divergir.
+      fillAndConsultar();
+      store.data.set([]); // zera o resultado
+      store.lastUpload.set({
+        originalName: 'b.csv', size: 1, uploadedAt: '',
+      });
+      expect(store.isStale()).toBe(false);
+    });
+
     it('true quando o arquivo UPADO difere do arquivo que gerou a consulta', () => {
       // Cenario: user consultou com a.csv -> upou b.csv (sucesso 201) ->
       // ainda nao clicou em Consultar de novo. Banner deve aparecer.

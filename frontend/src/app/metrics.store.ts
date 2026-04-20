@@ -237,6 +237,10 @@ export class MetricsStore {
     const q = this.lastQuery();
     if (!q) return false;
     if (this.loading()) return false;
+    // Sem dado em tela, nao existe "consulta" pra estar desatualizada —
+    // cobre o caso de aggregate ter devolvido array vazio (ex.: apos um
+    // reset ou DB limpa com lastQuery persistida no localStorage).
+    if (this.data().length === 0) return false;
     const uploaded = this.lastUpload()?.originalName ?? null;
     if (uploaded === null) return false;
     return uploaded !== q.uploadName;

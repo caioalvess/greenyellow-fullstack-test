@@ -383,7 +383,9 @@ function isoToDow(iso: string): number {
               <ng-template pTemplate="header">
                 <tr>
                   <th scope="col">{{ i18n.t('results.table.date') }}</th>
-                  <th scope="col">{{ i18n.t('results.table.weekday') }}</th>
+                  @if (showWeekdayColumn()) {
+                    <th scope="col">{{ i18n.t('results.table.weekday') }}</th>
+                  }
                   <th scope="col" class="right">{{ i18n.t('results.table.value') }}</th>
                 </tr>
               </ng-template>
@@ -391,7 +393,9 @@ function isoToDow(iso: string): number {
                 @if (store.loading()) {
                   <tr aria-hidden="true">
                     <td><p-skeleton width="7rem" height="0.95rem" /></td>
-                    <td><p-skeleton width="4rem" height="0.95rem" /></td>
+                    @if (showWeekdayColumn()) {
+                      <td><p-skeleton width="4rem" height="0.95rem" /></td>
+                    }
                     <td class="right">
                       <p-skeleton width="4rem" height="0.95rem" styleClass="ml-auto" />
                     </td>
@@ -399,12 +403,14 @@ function isoToDow(iso: string): number {
                 } @else {
                   <tr>
                     <td class="mono">{{ row.date }}</td>
-                    <td>
-                      <span
-                        class="dow-chip"
-                        [class.weekend]="row.isWeekend"
-                      >{{ row.dow }}</span>
-                    </td>
+                    @if (showWeekdayColumn()) {
+                      <td>
+                        <span
+                          class="dow-chip"
+                          [class.weekend]="row.isWeekend"
+                        >{{ row.dow }}</span>
+                      </td>
+                    }
                     <td class="right num">{{ row.value | number }}</td>
                   </tr>
                 }
@@ -1006,6 +1012,18 @@ export class ResultsPanelComponent implements OnInit, OnDestroy {
       this.store.searched() &&
       !this.store.loading() &&
       this.store.data().length === 0,
+  );
+
+  /**
+   * Coluna "Dia da semana" so faz sentido quando a consulta em tela foi
+   * por granularidade = DAY. Pra MONTH/YEAR, o backend devolve a data
+   * inicial do bucket (01/mm/yyyy ou 01/01/yyyy) — o dia-da-semana
+   * dessa data especifica seria ruido. Usa `lastQuery.granularity`
+   * (nao `store.granularity()`) pra refletir o dado que ESTA em tela,
+   * nao o form (que pode ter sido alterado sem nova consulta).
+   */
+  readonly showWeekdayColumn = computed(
+    () => this.store.lastQuery()?.granularity === 'DAY',
   );
 
   /**
