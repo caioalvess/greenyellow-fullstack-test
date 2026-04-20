@@ -142,6 +142,20 @@ Upload responde `201` assim que o blob sobe + a mensagem entra na fila — o con
 
 **SQL puro nas queries.** Enunciado pediu preferência e a escolha combinou com o caso: aggregate + report são 2 queries estáticas com window functions, não tem construção dinâmica que justificasse query builder. TypeORM continua responsável pelo mapeamento das entidades (`MetricReading`, `CsvUpload`) e pelo synchronize em dev.
 
+## Pontos técnicos
+
+**Storage engine custom pro Multer.** Em vez de `memoryStorage` (buffera tudo) ou `diskStorage` (escreve em /tmp), escrevi um `AzuriteStorageEngine` que pega o stream do campo multipart e pipa direto pro Azure via `blobClient.uploadStream`. O arquivo nunca é materializado na API — pico de RAM fica em O(chunk × concurrency) ≈ 20MB, não importa o tamanho do CSV.
+
+**SHA-256 inline via Transform stream.** Um `Sha256PassThrough` (extends `Transform`) fica no meio do pipe — os bytes passam por ele a caminho do Azurite e `hash.update(chunk)` roda em cada chunk. Dois "consumers" da mesma stream sem duplicar leitura nem quebrar backpressure. No final, `hash.digest('hex')` entrega o SHA-256 pronto pra checagem de dedup.
+
+**Report Excel com window functions puras.** O formato pedido (1 linha por leitura original + 3 colunas de agregação) não casa com `GROUP BY`. A query é um SELECT só com 3 `SUM(value) OVER (PARTITION BY metric_id, date_trunc('day'|'month'|'year', date_time))` — cada linha herda a agregação do próprio bucket sem precisar agrupar.
+
+**Signals + store central no front, sem NgRx nem prop-drilling.** Um único `MetricsStore` (providedIn: root) guarda form, resultados, status de upload, `lastQuery` e `pendingCsv`. Os componentes só injetam e consomem — `total`, `kpis`, `histogram`, `weekdayMeans`, `isStale` e `isSubmittable` são `computed` em cima do state. Um `effect()` cuida da persistência em `localStorage` sem acoplamento.
+
+**Consumer blindado contra corrida com o storage eager.** Como o blob anterior é deletado no upload novo, se o consumer tá atrasado processando o antigo quando isso acontece, ele pegaria um 404 do Azurite. O `csv-consumer.service.ts` trata esse caso + o de `csv_uploads` sem registro (mensagem remanescente de outra run): loga `warn`, chama `ack` e segue. Fila não trava, pipeline não quebra.
+
+**Deploy com scripts shell + az CLI, sem Terraform.** `provision.sh`, `build-push.sh`, `deploy.sh`, `cleanup.sh` — 4 scripts curtos em `infra/azure/`. Mais fácil de inspecionar e reproduzir, sem lock state, sem provider dance.
+
 ## Melhorias futuras
 
 - **Múltiplos arquivos ativos + cruzamento de dados.** A maior evolução seria abandonar o modelo "um arquivo por vez" e permitir que o usuário gerencie um acervo de uploads — subir vários CSVs, nomear/taguear, escolher em tempo de consulta quais incluir, cruzar métricas de arquivos diferentes num mesmo gráfico, comparar períodos. Exigiria uma tela de gerenciamento de uploads, filtros por upload no `/aggregate` e provavelmente alguma UI de comparação (dois gráficos lado a lado, diff de valores).
