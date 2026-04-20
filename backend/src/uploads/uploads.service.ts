@@ -142,6 +142,29 @@ export class UploadsService {
     }
     this.logger.log(`💾 csv_uploads → registro salvo id=${saved.id}`);
 
+    // Cleanup eager dos registros antigos: mantem apenas o recem-gravado
+    // em `csv_uploads`. Decisao por 2 motivos:
+    //   1. Dedup por hash: um arquivo previamente enviado mas nao mais
+    //      ativo nao deve bloquear reenvio (UX: "eu troquei pro B, agora
+    //      quero voltar pro A" — o hash de A nao pode 409-ar).
+    //   2. Coerencia com a substituicao eager do blob no Azurite — o
+    //      storage ja reflete "1 arquivo por vez", a metadata segue a
+    //      mesma politica.
+    // `metric_readings` continua sendo lazy-limpo no /aggregate pra
+    // preservar a UX "dado substituido no ato da consulta" — as rows
+    // stale viram orfas (csv_upload_id aponta pra UUID que nao existe
+    // mais) e sao deletadas no proximo query.
+    const dropped = (await this.uploadsRepo.query(
+      `DELETE FROM csv_uploads WHERE id <> $1::uuid`,
+      [saved.id],
+    )) as [unknown, number];
+    const droppedCount = Array.isArray(dropped) ? dropped[1] : 0;
+    if (droppedCount > 0) {
+      this.logger.log(
+        `🧹 csv_uploads → ${droppedCount} registro(s) antigo(s) removido(s) (historico limpo, so o ativo persiste)`,
+      );
+    }
+
     this.statusStore.register(blobName);
 
     // 5) Enfileira pro consumer.
