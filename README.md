@@ -1,6 +1,6 @@
 # GreenYellow — Teste Full Stack
 
-Teste técnico para vaga de Full Stack. O objetivo é receber um CSV de leituras de métricas, processar em background, armazenar no banco e expor endpoints de consulta (agregação por dia/mês/ano) e de relatório Excel. No front, uma interface para enviar o arquivo, consultar e baixar o relatório — com gráficos, KPIs, tabela paginada, dark mode e internacionalização.
+O objetivo é receber um CSV de leituras de métricas, processar em background, armazenar no banco e expor endpoints de consulta (agregação por dia/mês/ano) e de relatório Excel. No front, uma interface para enviar o arquivo, consultar e baixar o relatório — com gráficos, KPIs, tabela paginada, dark mode e internacionalização.
 
 ## Rodando em produção
 
