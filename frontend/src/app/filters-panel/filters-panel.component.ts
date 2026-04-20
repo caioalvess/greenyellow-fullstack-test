@@ -81,10 +81,10 @@ const PRESETS: Preset[] = [
                 {{ pending.file.name }}
                 <span class="muted">· {{ formatBytes(pending.file.size) }}</span>
               </dd>
-              <dt>{{ i18n.t('filters.preview.metricId') }}</dt>
+              <dt>{{ i18n.t('filters.preview.rows') }}</dt>
               <dd>
-                @if (pending.meta.metricId !== null) {
-                  <span class="pill">{{ pending.meta.metricId }}</span>
+                @if (pending.meta.rowCount !== null) {
+                  <span class="pill">{{ formatNumber(pending.meta.rowCount) }}</span>
                 } @else {
                   <em class="muted">{{ i18n.t('filters.preview.unknown') }}</em>
                 }

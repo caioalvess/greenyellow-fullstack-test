@@ -161,18 +161,70 @@ html, body {
     color: var(--gy-text-soft);
   }
 
-  /* Calendar (overlay que abre o date picker) */
-  .p-datepicker {
+  /* Calendar (overlay que abre o date picker).
+     O tema lara-light-blue hardcoda backgrounds claros (#d1d5db pro
+     "today", #f3f4f6 pro hover, #ffffff no header) que vazam no dark e
+     viram caixa cinza com numero branco — mesmo padrao que tinhamos
+     com os icones dos KPIs. Override aqui pra todos os estados. */
+  .p-datepicker,
+  .p-datepicker:not(.p-datepicker-inline) {
     background: var(--gy-surface);
     color: var(--gy-text);
     border-color: var(--gy-border);
   }
+  .p-datepicker:not(.p-datepicker-inline) .p-datepicker-header,
+  .p-datepicker .p-datepicker-header {
+    background: var(--gy-surface);
+    color: var(--gy-text);
+    border-color: var(--gy-border);
+  }
+  .p-datepicker .p-datepicker-header .p-datepicker-prev,
+  .p-datepicker .p-datepicker-header .p-datepicker-next {
+    color: var(--gy-text-soft);
+  }
+  .p-datepicker .p-datepicker-header .p-datepicker-prev:enabled:hover,
+  .p-datepicker .p-datepicker-header .p-datepicker-next:enabled:hover {
+    background: var(--gy-surface-2);
+    color: var(--gy-green);
+  }
+  .p-datepicker .p-datepicker-header .p-datepicker-title .p-datepicker-year,
+  .p-datepicker .p-datepicker-header .p-datepicker-title .p-datepicker-month {
+    color: var(--gy-text);
+  }
+  .p-datepicker .p-datepicker-header .p-datepicker-title .p-datepicker-year:enabled:hover,
+  .p-datepicker .p-datepicker-header .p-datepicker-title .p-datepicker-month:enabled:hover {
+    color: var(--gy-green);
+  }
+  .p-datepicker table th {
+    color: var(--gy-text-soft);
+  }
   .p-datepicker table td > span {
     color: var(--gy-text);
   }
+  .p-datepicker table td.p-datepicker-today > span {
+    background: var(--gy-surface-2);
+    color: var(--gy-text);
+    border: 1px solid var(--gy-border);
+  }
+  .p-datepicker table td.p-datepicker-today > span.p-highlight,
   .p-datepicker table td > span.p-highlight {
     background: var(--gy-green-50);
     color: var(--gy-green);
+    border-color: transparent;
+  }
+  .p-datepicker:not(.p-disabled) table td span:not(.p-highlight):not(.p-disabled):hover,
+  .p-datepicker:not(.p-disabled) .p-monthpicker .p-monthpicker-month:not(.p-disabled):not(.p-highlight):hover,
+  .p-datepicker:not(.p-disabled) .p-yearpicker .p-yearpicker-year:not(.p-disabled):not(.p-highlight):hover {
+    background: var(--gy-surface-2);
+  }
+  .p-datepicker .p-monthpicker .p-monthpicker-month.p-highlight,
+  .p-datepicker .p-yearpicker .p-yearpicker-year.p-highlight {
+    background: var(--gy-green-50);
+    color: var(--gy-green);
+  }
+  .p-datepicker .p-datepicker-buttonbar,
+  .p-datepicker .p-timepicker {
+    border-color: var(--gy-border);
   }
 
   /* Button outlined (pra nao aparecer fundo branco no hover) */

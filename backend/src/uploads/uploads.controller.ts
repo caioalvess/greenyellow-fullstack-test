@@ -11,6 +11,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBody,
+  ApiConflictResponse,
   ApiConsumes,
   ApiOkResponse,
   ApiOperation,
@@ -43,6 +44,30 @@ export class UploadsController {
     schema: {
       type: 'object',
       properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiConflictResponse({
+    description:
+      'Arquivo com conteudo identico (mesmo SHA-256) ja foi enviado — ' +
+      'o blob recem-uploaded e descartado e a resposta traz os metadados ' +
+      'do upload original em `existing`.',
+    schema: {
+      type: 'object',
+      properties: {
+        statusCode: { type: 'number', example: 409 },
+        message: {
+          type: 'string',
+          example: 'arquivo duplicado: conteudo identico ja foi enviado',
+        },
+        existing: {
+          type: 'object',
+          properties: {
+            originalName: { type: 'string' },
+            uploadedAt: { type: 'string', format: 'date-time' },
+            size: { type: 'number' },
+          },
+        },
+      },
     },
   })
   async upload(@UploadedFile() file?: UploadedCsvFile) {

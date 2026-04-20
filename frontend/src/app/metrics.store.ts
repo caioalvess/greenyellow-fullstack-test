@@ -1,4 +1,11 @@
-import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
+import {
+  DestroyRef,
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subscription, catchError, of, switchMap, timer } from 'rxjs';
 import { MessageService } from 'primeng/api';
@@ -19,6 +26,31 @@ export interface PendingCsv {
 
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 120_000;
+
+/**
+ * Chave do localStorage pro snapshot da sessao. Versionada (`.v1`) pra
+ * que mudancas no shape do snapshot invalidem dados antigos sem risco
+ * de crash em runtime — se um usuario com storage legado abrir a app,
+ * readSession() retorna null via parse defensivo e a sessao comeca
+ * vazia.
+ */
+const SESSION_STORAGE_KEY = 'gy.metrics.session.v1';
+
+interface PersistedSession {
+  metricId: number | null;
+  dateInitial: string | null; // ISO 8601
+  finalDate: string | null;
+  granularity: Granularity;
+  lastUpload: UploadedFileMeta | null;
+  uploadStatus: UploadStatus | null;
+  lastQuery: {
+    metricId: number;
+    dateInitial: string;
+    finalDate: string;
+    granularity: Granularity;
+    uploadName: string | null;
+  } | null;
+}
 
 export interface UploadedFileMeta {
   originalName: string;
@@ -162,19 +194,24 @@ export class MetricsStore {
       this.finalDate() !== null,
   );
   /**
-   * Habilita os botoes somente quando:
-   *  - form esta valido (metricId + datas)
-   *  - E existe um CSV ja' enviado
-   *
-   * Exceção: metricId === 999 e' um dataset de demo pre-seedeado no banco
-   * (ver db/seed-demo.sql) — libera sem exigir upload novo pra facilitar
-   * demonstracao de paginacao/cenarios com muitos dados.
+   * Habilita os botoes quando:
+   *  - form esta valido (metricId + datas); E
+   *  - o sistema ja' tem dado no banco, o que e' verdade quando qualquer
+   *    uma das condicoes abaixo e' satisfeita:
+   *      1. lastQuery !== null — ja' houve uma consulta bem-sucedida
+   *         nesta sessao (ou restaurada do localStorage). O banco e'
+   *         cumulativo, entao dado antigo continua la. Removar o
+   *         arquivo do dropzone nao apaga nada do banco — so' limpa a
+   *         UI — logo a consulta seguinte deve funcionar.
+   *      2. lastUpload existe + status == completed — upload pronto
+   *         nesta sessao (primeira consulta antes de qualquer refetch).
+   *      3. metricId === 999 — exceção do dataset de demo pre-seedeado
+   *         (ver db/seed-demo.sql), libera sem exigir upload.
    */
   readonly isSubmittable = computed(() => {
     if (!this.isFormValid()) return false;
     if (this.metricId() === 999) return true;
-    // CSV precisa estar enviado E processamento concluido (ou desconhecido por
-    // reload da pagina — nesse caso lastUpload seria null e cairia no false).
+    if (this.lastQuery() !== null) return true;
     if (this.lastUpload() === null) return false;
     const status = this.uploadStatus();
     if (!status) return false;
@@ -182,36 +219,42 @@ export class MetricsStore {
   });
 
   /**
-   * Resultados em tela refletem um estado divergente do formulário/upload
-   * atual — user trocou arquivo, mexeu nas datas ou no metricId sem
-   * refazer a consulta. Usado pra mostrar um banner "stale" no
-   * ResultsPanel. Falso quando nao ha consulta anterior OU quando esta
-   * carregando (o banner some durante o fetch).
+   * Banner "resultados desatualizados". Dispara quando o arquivo
+   * ATUALMENTE ENVIADO (lastUpload) difere do arquivo que gerou a
+   * consulta em tela (lastQuery.uploadName). Ou seja: o user subiu um
+   * CSV novo mas ainda nao clicou em "Consultar" — a tela mostra dado
+   * antigo e precisa ser refrescada.
+   *
+   * Preview (pendingCsv) NAO conta: enquanto o arquivo esta apenas em
+   * pre-visualizacao, o user ainda nao se comprometeu com ele, entao a
+   * consulta em tela ainda e' valida. Mexer em datas/metricId/granularidade
+   * tambem nao dispara o banner (ruidoso demais durante a edicao do form).
+   * lastUpload=null (arquivo removido do dropzone) tambem nao conta: o
+   * banco cumulativo nao apaga dado, entao a consulta anterior continua
+   * batendo com o que esta la.
    */
   readonly isStale = computed(() => {
     const q = this.lastQuery();
     if (!q) return false;
     if (this.loading()) return false;
-    if (this.data().length === 0) return false;
-    const di = this.dateInitial();
-    const fd = this.finalDate();
-    // Se o user limpou alguma data, obviamente stale — mas nao vale a
-    // pena chamar toIsoDate(null).
-    if (!di || !fd) return true;
-    const currentUpload = this.lastUpload()?.originalName ?? null;
-    return (
-      q.metricId !== this.metricId() ||
-      q.dateInitial !== this.toIsoDate(di) ||
-      q.finalDate !== this.toIsoDate(fd) ||
-      q.granularity !== this.granularity() ||
-      q.uploadName !== currentUpload
-    );
+    const uploaded = this.lastUpload()?.originalName ?? null;
+    if (uploaded === null) return false;
+    return uploaded !== q.uploadName;
   });
 
   private readonly api = inject(ApiService);
   private readonly messages = inject(MessageService);
   private readonly i18n = inject(I18nService);
   private readonly destroyRef = inject(DestroyRef);
+
+  constructor() {
+    // Ordem importa: hidrata os signals ANTES de registrar o effect de
+    // persistencia, senao o primeiro write do effect gravaria o estado
+    // zerado por cima do que estava salvo. Setar signals durante hidrate
+    // nao dispara o effect nesse ponto porque ele so' e' criado depois.
+    this.hydrateFromStorage();
+    this.setupSessionPersistence();
+  }
 
   consultar(): void {
     if (!this.isFormValid()) return;
@@ -223,8 +266,28 @@ export class MetricsStore {
     if (this.metricId() === 999) {
       if (this.pendingCsv()) this.cancelPendingUpload();
       if (this.lastUpload()) this.clearUpload();
+      this.runAggregate();
+      return;
     }
 
+    // Se ha CSV em pre-visualizacao, "Consultar" comita o upload antes
+    // (mesmo fluxo do botao "Enviar" na preview). Isso faz com que o
+    // banner "Resultados desatualizados > Refazer consulta" e o botao
+    // "Consultar" da sidebar tenham o mesmo comportamento: dedup por
+    // hash roda naturalmente — arquivo igual cai em 409 (toast warn
+    // + drop limpo), arquivo novo cai em 201 (polling inicia). A query
+    // dispara em seguida, refletindo o estado corrente do banco (nao
+    // muda em 409; em 201, o user precisa re-consultar apos o processing
+    // terminar pra ver os dados novos, mas a UI do dropzone ja sinaliza
+    // o processamento em andamento).
+    if (this.pendingCsv()) {
+      this.confirmPendingUpload();
+    }
+
+    this.runAggregate();
+  }
+
+  private runAggregate(): void {
     this.loading.set(true);
     this.searched.set(true);
 
@@ -289,7 +352,7 @@ export class MetricsStore {
     try {
       meta = await extractCsvMeta(file);
     } catch {
-      meta = { metricId: null, firstDate: null, lastDate: null };
+      meta = { metricId: null, firstDate: null, lastDate: null, rowCount: null };
     }
     this.pendingCsv.set({ file, meta });
   }
@@ -345,6 +408,20 @@ export class MetricsStore {
       },
       error: (err) => {
         this.uploading.set(false);
+        // 409: arquivo com SHA-256 identico ja' foi enviado. O backend
+        // devolve `{existing: {originalName, uploadedAt, size}}` — toast
+        // especifico avisa o usuario sem poluir o fluxo de erro generico.
+        if (err?.status === 409 && err?.error?.existing?.originalName) {
+          this.messages.add({
+            severity: 'warn',
+            summary: this.i18n.t('toast.upload.duplicate.title'),
+            detail: this.i18n.t('toast.upload.duplicate.detail', {
+              name: err.error.existing.originalName,
+            }),
+            life: 7000,
+          });
+          return;
+        }
         this.messages.add({
           severity: 'error',
           summary: this.i18n.t('toast.upload.error.title'),
@@ -445,6 +522,98 @@ export class MetricsStore {
         life: 3000,
       });
     }
+  }
+
+  /**
+   * Le o snapshot da sessao do localStorage (se houver) e popula os
+   * signals com o que o user tinha antes do reload. Se havia uma consulta
+   * anterior, dispara um GET /metrics/aggregate pra recarregar os dados
+   * — o banco e' a fonte de verdade, nao armazenamos o array `data` em
+   * disco. Em falha silenciosa (quota, JSON corrompido, etc) ignora e
+   * comeca com sessao vazia.
+   */
+  private hydrateFromStorage(): void {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    } catch {
+      return; // storage indisponivel (SSR, sandbox, etc)
+    }
+    if (!raw) return;
+
+    let s: Partial<PersistedSession>;
+    try {
+      s = JSON.parse(raw) as Partial<PersistedSession>;
+    } catch {
+      return; // JSON corrompido — deixa o effect sobrescrever
+    }
+
+    if (typeof s.metricId === 'number') this.metricId.set(s.metricId);
+    if (s.dateInitial) {
+      const d = new Date(s.dateInitial);
+      if (!Number.isNaN(d.valueOf())) this.dateInitial.set(d);
+    }
+    if (s.finalDate) {
+      const d = new Date(s.finalDate);
+      if (!Number.isNaN(d.valueOf())) this.finalDate.set(d);
+    }
+    if (s.granularity === 'DAY' || s.granularity === 'MONTH' || s.granularity === 'YEAR') {
+      this.granularity.set(s.granularity);
+    }
+    if (s.lastUpload) this.lastUpload.set(s.lastUpload);
+    if (s.uploadStatus) this.uploadStatus.set(s.uploadStatus);
+
+    if (s.lastQuery) {
+      this.lastQuery.set(s.lastQuery);
+      this.searched.set(true);
+      this.loading.set(true);
+      this.api
+        .aggregate({
+          metricId: s.lastQuery.metricId,
+          dateInitial: s.lastQuery.dateInitial,
+          finalDate: s.lastQuery.finalDate,
+          granularity: s.lastQuery.granularity,
+        })
+        .subscribe({
+          next: (rows) => {
+            this.data.set(rows);
+            this.loading.set(false);
+          },
+          error: () => {
+            // Usuario nao disparou nada — nao mostra toast pra nao ruido.
+            // Apenas libera o loading; a UI cai no estado "sem dados" e o
+            // banner de stale/nova consulta guia o proximo passo.
+            this.loading.set(false);
+          },
+        });
+    }
+  }
+
+  /**
+   * Effect que serializa o estado relevante da sessao no localStorage a
+   * cada mudanca nos signals lidos. Roda uma vez na criacao pra tracar
+   * dependencias, entao sob demanda. Array `data` e' propositalmente
+   * excluido — re-fetchamos no hydrate pra garantir consistencia com o
+   * banco.
+   */
+  private setupSessionPersistence(): void {
+    effect(() => {
+      const snapshot: PersistedSession = {
+        metricId: this.metricId(),
+        dateInitial: this.dateInitial()?.toISOString() ?? null,
+        finalDate: this.finalDate()?.toISOString() ?? null,
+        granularity: this.granularity(),
+        lastUpload: this.lastUpload(),
+        uploadStatus: this.uploadStatus(),
+        lastQuery: this.lastQuery(),
+      };
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+      } catch {
+        // quota excedida ou storage readonly — ignora; a sessao vive em
+        // memoria nesse render e some no proximo reload.
+      }
+    });
   }
 
   private toIsoDate(d: Date): string {

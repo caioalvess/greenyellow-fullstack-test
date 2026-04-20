@@ -10,12 +10,21 @@ export interface CsvMeta {
   metricId: number | null;
   firstDate: Date | null;
   lastDate: Date | null;
+  /**
+   * Quantidade aproximada de linhas de DADOS (exclui header e padding
+   * `;;`). Se o arquivo cabe no chunk de 64KB, e' exato; se excede,
+   * e' estimado pelo ratio (linhas validas no head / bytes do head) ×
+   * tamanho total. A aproximacao e' precisa o bastante pra preview —
+   * valor final sai do backend quando o consumer termina de processar.
+   */
+  rowCount: number | null;
 }
 
 const CHUNK_BYTES = 64 * 1024;
 
 export async function extractCsvMeta(file: File): Promise<CsvMeta> {
-  const headText = await readTextSlice(file, 0, Math.min(CHUNK_BYTES, file.size));
+  const headBytes = Math.min(CHUNK_BYTES, file.size);
+  const headText = await readTextSlice(file, 0, headBytes);
   const headLines = splitValidLines(headText);
   const first = findFirstDataLine(headLines);
 
@@ -39,7 +48,27 @@ export async function extractCsvMeta(file: File): Promise<CsvMeta> {
     metricId: first?.metricId ?? null,
     firstDate: first?.date ?? null,
     lastDate: last?.date ?? first?.date ?? null,
+    rowCount: estimateRowCount(headLines, headBytes, file.size),
   };
+}
+
+/**
+ * Conta linhas de dados validas (que parseam como leitura) no head e
+ * extrapola pro arquivo inteiro. Se o head ja cobre o arquivo todo,
+ * devolve o valor exato.
+ */
+function estimateRowCount(
+  headLines: string[],
+  headBytes: number,
+  totalBytes: number,
+): number | null {
+  if (headLines.length === 0 || headBytes === 0) return null;
+  const dataLinesInHead = headLines.filter(
+    (l) => parseDataLine(l) !== null,
+  ).length;
+  if (dataLinesInHead === 0) return null;
+  if (totalBytes <= headBytes) return dataLinesInHead;
+  return Math.round((totalBytes / headBytes) * dataLinesInHead);
 }
 
 function splitValidLines(text: string): string[] {

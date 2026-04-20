@@ -76,4 +76,15 @@ export class AzuriteService implements OnModuleInit {
     }
     return names;
   }
+
+  /**
+   * Remove um blob. Usado no rollback de dedup: quando um upload
+   * duplicado termina de streamar pro Azurite e o UploadsService
+   * detecta o hash ja' conhecido, deletamos o blob pra nao acumular
+   * lixo. Se o blob nao existir, `deleteIfExists` retorna sem erro.
+   */
+  async deleteBlob(blobName: string): Promise<void> {
+    const blobClient = this.container.getBlockBlobClient(blobName);
+    await blobClient.deleteIfExists();
+  }
 }

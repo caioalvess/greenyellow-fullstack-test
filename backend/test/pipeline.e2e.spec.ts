@@ -78,6 +78,7 @@ describe('Pipeline CSV (E2E real)', () => {
 
     dataSource = app.get(DataSource);
     await dataSource.query('TRUNCATE metric_readings RESTART IDENTITY');
+    await dataSource.query('TRUNCATE csv_uploads');
   }, 45000);
 
   afterAll(async () => {
@@ -174,6 +175,42 @@ describe('Pipeline CSV (E2E real)', () => {
       .attach('file', Buffer.from('oi'), 'x.txt')
       .expect(400);
   });
+
+  it('dedup por SHA-256: reenvio do mesmo conteudo retorna 409', async () => {
+    const csv = Buffer.from(
+      [
+        'metricId;dateTime;value',
+        '99;01/01/2024 00:00;1',
+        '99;02/01/2024 00:00;2',
+      ].join('\n'),
+    );
+
+    const first = await request(app.getHttpServer())
+      .post('/uploads')
+      .attach('file', csv, 'dedup.csv')
+      .expect(201);
+    expect(first.body.originalName).toBe('dedup.csv');
+
+    // Mesmo conteudo, nome diferente — hash e igual, rejeita.
+    const second = await request(app.getHttpServer())
+      .post('/uploads')
+      .attach('file', csv, 'dedup-outro-nome.csv')
+      .expect(409);
+    expect(second.body.existing).toEqual(
+      expect.objectContaining({
+        originalName: 'dedup.csv',
+        uploadedAt: expect.any(String),
+        size: expect.any(Number),
+      }),
+    );
+
+    // Conteudo diferente por um byte — hash muda, aceita.
+    const csvPlus = Buffer.concat([csv, Buffer.from('\n99;03/01/2024 00:00;3')]);
+    await request(app.getHttpServer())
+      .post('/uploads')
+      .attach('file', csvPlus, 'dedup-plus.csv')
+      .expect(201);
+  }, 20000);
 
   it('validacao preservada: aggregate com metricId invalido retorna 400', async () => {
     await request(app.getHttpServer())

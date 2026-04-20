@@ -24,6 +24,11 @@ describe('MetricsStore', () => {
   let messages: { add: jest.Mock };
 
   beforeEach(() => {
+    // MetricsStore hidrata do localStorage no construtor. Limpa entre
+    // testes pra evitar vazamento — um teste que escreve snapshot de
+    // sessao contaminaria o proximo.
+    localStorage.clear();
+
     api = {
       uploadCsv: jest.fn(),
       aggregate: jest.fn(),
@@ -92,6 +97,23 @@ describe('MetricsStore', () => {
       expect(store.isSubmittable()).toBe(false); // processando
 
       store.uploadStatus.set(status('completed', 10));
+      expect(store.isSubmittable()).toBe(true);
+    });
+
+    it('libera consulta quando ja houve lastQuery mesmo sem lastUpload', () => {
+      // Cenario: user subiu arquivo, consultou com sucesso, depois removeu
+      // o arquivo do dropzone. Banco continua com dado; botao nao pode
+      // travar. Tambem cobre F5 apos sessao: persistencia restaura
+      // lastQuery mesmo sem lastUpload.
+      fillForm(100);
+      store.lastQuery.set({
+        metricId: 100,
+        dateInitial: '2024-01-01',
+        finalDate: '2024-01-31',
+        granularity: 'DAY',
+        uploadName: 'x.csv',
+      });
+      expect(store.lastUpload()).toBeNull();
       expect(store.isSubmittable()).toBe(true);
     });
   });
@@ -239,16 +261,38 @@ describe('MetricsStore', () => {
       store.consultar();
     };
 
+    const setPending = (name: string) => {
+      store.pendingCsv.set({
+        file: new File(['x'], name),
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
+      });
+    };
+
     it('false antes da primeira consulta', () => {
       expect(store.isStale()).toBe(false);
     });
 
-    it('false logo apos consulta (snapshot == estado atual)', () => {
+    it('false logo apos consulta (lastUpload == uploadName da consulta)', () => {
       fillAndConsultar();
       expect(store.isStale()).toBe(false);
     });
 
-    it('true quando o arquivo muda apos a consulta', () => {
+    it('false quando mexe na data/granularidade sem novo upload', () => {
+      fillAndConsultar();
+      store.finalDate.set(new Date(2024, 1, 15));
+      store.granularity.set('MONTH');
+      expect(store.isStale()).toBe(false);
+    });
+
+    it('false quando ha apenas arquivo em preview (sem upload comitado)', () => {
+      fillAndConsultar(); // uploadName snapshot = 'a.csv'
+      setPending('b.csv');
+      expect(store.isStale()).toBe(false);
+    });
+
+    it('true quando o arquivo UPADO difere do arquivo que gerou a consulta', () => {
+      // Cenario: user consultou com a.csv -> upou b.csv (sucesso 201) ->
+      // ainda nao clicou em Consultar de novo. Banner deve aparecer.
       fillAndConsultar();
       store.lastUpload.set({
         originalName: 'b.csv', size: 1, uploadedAt: '',
@@ -256,43 +300,154 @@ describe('MetricsStore', () => {
       expect(store.isStale()).toBe(true);
     });
 
-    it('true quando o arquivo e removido apos a consulta', () => {
+    it('false quando o user remove o arquivo do dropzone apos consultar', () => {
+      // Banco cumulativo nao apaga dado; a consulta continua refletindo
+      // o estado real. Remover do drop e' UI-only, nao justifica banner.
       fillAndConsultar();
       store.lastUpload.set(null);
-      expect(store.isStale()).toBe(true);
-    });
-
-    it('true quando o user mexe na data', () => {
-      fillAndConsultar();
-      store.finalDate.set(new Date(2024, 1, 15));
-      expect(store.isStale()).toBe(true);
-    });
-
-    it('true quando o user troca a granularidade', () => {
-      fillAndConsultar();
-      store.granularity.set('MONTH');
-      expect(store.isStale()).toBe(true);
-    });
-
-    it('true quando o user limpa uma data (form invalido)', () => {
-      fillAndConsultar();
-      store.dateInitial.set(null);
-      expect(store.isStale()).toBe(true);
+      expect(store.isStale()).toBe(false);
     });
 
     it('false enquanto carregando (o banner nao pisca durante o fetch)', () => {
       fillAndConsultar();
+      store.lastUpload.set({
+        originalName: 'b.csv', size: 1, uploadedAt: '',
+      });
       store.loading.set(true);
       expect(store.isStale()).toBe(false);
     });
 
-    it('volta pra false apos refazer a consulta', () => {
+    it('volta pra false apos refazer a consulta com o novo arquivo', () => {
       fillAndConsultar();
-      store.granularity.set('MONTH'); // stale
+      store.lastUpload.set({
+        originalName: 'b.csv', size: 1, uploadedAt: '',
+      });
+      store.uploadStatus.set(status('completed', 1));
       expect(store.isStale()).toBe(true);
       api.aggregate.mockReturnValue(of([{ date: '2024-01-01', value: 1 }]));
       store.consultar();
       expect(store.isStale()).toBe(false);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Persistencia de sessao (localStorage + re-fetch no F5)
+  // ------------------------------------------------------------------
+  describe('persistencia de sessao', () => {
+    const SESSION_KEY = 'gy.metrics.session.v1';
+
+    const rebuildStore = () => {
+      TestBed.resetTestingModule();
+      localStorage.clear = localStorage.clear; // no-op: preserva o snapshot ja escrito
+      api = {
+        uploadCsv: jest.fn(),
+        aggregate: jest.fn(),
+        getUploadStatus: jest.fn(),
+        reportUrl: jest.fn().mockReturnValue(''),
+      } as unknown as jest.Mocked<ApiService>;
+      TestBed.configureTestingModule({
+        providers: [
+          MetricsStore,
+          { provide: ApiService, useValue: api },
+          { provide: MessageService, useValue: { add: jest.fn() } },
+        ],
+      });
+      TestBed.inject(I18nService).setLocale('pt');
+      return TestBed.inject(MetricsStore);
+    };
+
+    it('grava o estado do form no localStorage quando o user preenche', fakeAsync(() => {
+      store.metricId.set(42);
+      store.dateInitial.set(new Date(2024, 0, 1));
+      store.finalDate.set(new Date(2024, 0, 31));
+      store.granularity.set('MONTH');
+      flush(); // deixa o effect rodar
+
+      const raw = localStorage.getItem(SESSION_KEY);
+      expect(raw).not.toBeNull();
+      const s = JSON.parse(raw!);
+      expect(s.metricId).toBe(42);
+      expect(s.granularity).toBe('MONTH');
+      expect(s.dateInitial).toMatch(/^2024-/);
+    }));
+
+    it('restaura form + lastUpload ao instanciar se havia snapshot', () => {
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({
+          metricId: 77,
+          dateInitial: new Date(2024, 2, 10).toISOString(),
+          finalDate: new Date(2024, 2, 20).toISOString(),
+          granularity: 'DAY',
+          lastUpload: { originalName: 'foo.csv', size: 9, uploadedAt: 'x' },
+          uploadStatus: status('completed', 9),
+          lastQuery: null,
+        }),
+      );
+
+      const fresh = rebuildStore();
+      expect(fresh.metricId()).toBe(77);
+      expect(fresh.dateInitial()?.getFullYear()).toBe(2024);
+      expect(fresh.granularity()).toBe('DAY');
+      expect(fresh.lastUpload()?.originalName).toBe('foo.csv');
+      expect(fresh.searched()).toBe(false); // sem lastQuery nao liga searched
+    });
+
+    it('re-fetcha os dados via /aggregate quando havia lastQuery', () => {
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({
+          metricId: 55,
+          dateInitial: new Date(2024, 0, 1).toISOString(),
+          finalDate: new Date(2024, 0, 31).toISOString(),
+          granularity: 'DAY',
+          lastUpload: null,
+          uploadStatus: null,
+          lastQuery: {
+            metricId: 55,
+            dateInitial: '2024-01-01',
+            finalDate: '2024-01-31',
+            granularity: 'DAY',
+            uploadName: 'old.csv',
+          },
+        }),
+      );
+
+      const aggregateSpy = jest.fn().mockReturnValue(
+        of([{ date: '2024-01-05', value: 10 }]),
+      );
+      TestBed.resetTestingModule();
+      api = {
+        uploadCsv: jest.fn(),
+        aggregate: aggregateSpy,
+        getUploadStatus: jest.fn(),
+        reportUrl: jest.fn().mockReturnValue(''),
+      } as unknown as jest.Mocked<ApiService>;
+      TestBed.configureTestingModule({
+        providers: [
+          MetricsStore,
+          { provide: ApiService, useValue: api },
+          { provide: MessageService, useValue: { add: jest.fn() } },
+        ],
+      });
+      TestBed.inject(I18nService).setLocale('pt');
+      const fresh = TestBed.inject(MetricsStore);
+
+      expect(aggregateSpy).toHaveBeenCalledWith({
+        metricId: 55,
+        dateInitial: '2024-01-01',
+        finalDate: '2024-01-31',
+        granularity: 'DAY',
+      });
+      expect(fresh.data()).toEqual([{ date: '2024-01-05', value: 10 }]);
+      expect(fresh.searched()).toBe(true);
+    });
+
+    it('ignora snapshot corrompido sem quebrar', () => {
+      localStorage.setItem(SESSION_KEY, 'not-json{');
+      const fresh = rebuildStore();
+      expect(fresh.metricId()).toBeNull();
+      expect(fresh.dateInitial()).toBeNull();
     });
   });
 
@@ -325,6 +480,7 @@ describe('MetricsStore', () => {
           metricId: 42,
           firstDate: new Date(2024, 0, 1),
           lastDate: new Date(2024, 0, 31),
+          rowCount: 10,
         },
       });
 
@@ -342,7 +498,7 @@ describe('MetricsStore', () => {
       store.metricId.set(77);
       store.pendingCsv.set({
         file: new File(['x'], 'data.csv'),
-        meta: { metricId: null, firstDate: null, lastDate: null },
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
       });
 
       store.confirmPendingUpload();
@@ -359,7 +515,7 @@ describe('MetricsStore', () => {
     it('cancelPendingUpload: zera pendingCsv sem chamar API', () => {
       store.pendingCsv.set({
         file: new File(['x'], 'data.csv'),
-        meta: { metricId: null, firstDate: null, lastDate: null },
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
       });
 
       store.cancelPendingUpload();
@@ -574,7 +730,7 @@ describe('MetricsStore', () => {
       store.metricId.set(999);
       store.pendingCsv.set({
         file: new File(['x'], 'x.csv'),
-        meta: { metricId: null, firstDate: null, lastDate: null },
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
       });
       api.aggregate.mockReturnValue(of([]));
 
@@ -634,6 +790,60 @@ describe('MetricsStore', () => {
           detail: 'Range invalido; MetricId obrigatorio',
         }),
       );
+    });
+
+    it('com pendingCsv: comita o upload (uploadCsv) E dispara aggregate', () => {
+      fillForm();
+      const file = new File(['csv-body'], 'preview.csv');
+      store.pendingCsv.set({
+        file,
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
+      });
+      api.uploadCsv.mockReturnValue(
+        of({ blobName: 'x-preview.csv', originalName: 'preview.csv', uploadedAt: '', size: 8 }),
+      );
+      api.getUploadStatus.mockReturnValue(of(status('completed', 1)));
+      api.aggregate.mockReturnValue(of([]));
+
+      store.consultar();
+
+      // Upload comitado (mesmo fluxo do botao "Enviar")
+      expect(api.uploadCsv).toHaveBeenCalledWith(file);
+      expect(store.pendingCsv()).toBeNull();
+      // Aggregate dispara em seguida
+      expect(api.aggregate).toHaveBeenCalled();
+    });
+
+    it('com pendingCsv duplicado (409): dispara toast warn + mantem aggregate', () => {
+      fillForm();
+      const file = new File(['csv-body'], 'dup.csv');
+      store.pendingCsv.set({
+        file,
+        meta: { metricId: null, firstDate: null, lastDate: null, rowCount: null },
+      });
+      api.uploadCsv.mockReturnValue(
+        throwError(() => ({
+          status: 409,
+          error: {
+            message: 'arquivo duplicado',
+            existing: { originalName: 'original.csv', uploadedAt: '', size: 8 },
+          },
+        })),
+      );
+      api.aggregate.mockReturnValue(of([]));
+
+      store.consultar();
+
+      expect(api.uploadCsv).toHaveBeenCalledWith(file);
+      expect(store.pendingCsv()).toBeNull();
+      expect(messages.add).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: 'warn',
+          summary: 'Arquivo já enviado',
+        }),
+      );
+      // Aggregate fecha o ciclo mesmo quando o upload foi rejeitado
+      expect(api.aggregate).toHaveBeenCalled();
     });
   });
 });

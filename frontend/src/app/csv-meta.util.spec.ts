@@ -76,7 +76,37 @@ describe('csv-meta.util — extractCsvMeta', () => {
       metricId: null,
       firstDate: null,
       lastDate: null,
+      rowCount: null,
     });
+  });
+
+  it('rowCount exato quando o arquivo cabe no head chunk (<=64KB)', async () => {
+    const csv = [
+      'metricId;dateTime;value', // header — nao conta
+      '100;01/01/2024 00:00;1',
+      '100;02/01/2024 00:00;2',
+      '100;03/01/2024 00:00;3',
+      ';;',
+      ';;',
+    ].join('\n');
+
+    const meta = await extractCsvMeta(csvFile(csv));
+
+    expect(meta.rowCount).toBe(3);
+  });
+
+  it('rowCount estimado quando o arquivo excede o head chunk', async () => {
+    const line = '100;15/06/2024 00:00;1\n';
+    const repeats = 4000; // ~88KB, ultrapassa 64KB do head
+    const csv = line.repeat(repeats);
+    expect(csv.length).toBeGreaterThan(64 * 1024);
+
+    const meta = await extractCsvMeta(csvFile(csv));
+
+    // Linhas sao uniformes, entao a estimativa deve bater com alta precisao
+    expect(meta.rowCount).not.toBeNull();
+    expect(meta.rowCount!).toBeGreaterThan(repeats * 0.9);
+    expect(meta.rowCount!).toBeLessThan(repeats * 1.1);
   });
 
   it('usa slice de head + tail quando arquivo excede o chunk (>64KB)', async () => {
