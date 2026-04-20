@@ -58,11 +58,11 @@ Insere 1440 linhas para a métrica 999 (60 dias × 24h em Jan-Fev/2024). A opera
 ### Rodar os testes
 
 ```bash
-docker compose exec api npm test        # backend (29 testes)
-docker compose exec frontend npm test   # frontend (94 testes)
+docker compose exec api npm test        # backend (32 testes)
+docker compose exec frontend npm test   # frontend (96 testes)
 ```
 
-**123 testes no total.** O backend sobe um banco separado (`gy_metrics_test`) em 3 suítes (~10s); o frontend usa Jest + jsdom em 7 suítes (~25s). Detalhes de cobertura na seção *Testes* abaixo.
+**128 testes no total.** O backend sobe um banco separado (`gy_metrics_test`) em 3 suítes (~10s); o frontend usa Jest + jsdom em 7 suítes (~25s). Detalhes de cobertura na seção *Testes* abaixo.
 
 ### Produção local
 
@@ -151,7 +151,9 @@ O upload é encaminhado via stream direto para o blob (a API não bufferiza o ar
 
 **Dedupe por SHA-256 antes da fila.** Com a versão inicial, o banco garantia idempotência via unique de `(metricId, dateTime)`, mas um reenvio do mesmo arquivo ainda gerava um blob novo no Azurite e desperdiçava um ciclo completo de parse + inserção (para tudo ser descartado pelo conflict). Adicionei um `Sha256PassThrough` (Transform stream que hasheia inline enquanto faz o pipe pro blob) e uma tabela `csv_uploads` com unique em `sha256`. O fluxo atualizado: o engine do Multer pipa o arquivo através do hasher pro Azurite; quando termina, o `UploadsService` consulta o hash no Postgres — se existir, **deleta o blob recém-uploaded** e responde `409 Conflict` com os metadados do upload original (`{existing: {originalName, uploadedAt, size}}`); se não existir, grava o registro e publica pra fila. Há também try/catch do unique constraint `23505` na escrita pra cobrir o caso de dois uploads simultâneos com o mesmo conteúdo (o primeiro grava, o segundo volta com 409). A stream continua sendo ponta a ponta — o hash não bufferiza nada. Testes cobrem: o `Sha256PassThrough` em isolado (3 casos) e o fluxo E2E de duplicata retornando 409 com `existing` preenchido. No front, o toast tratando o 409 usa severity `warn` ao invés de `error` pra não parecer falha — é o sistema recusando trabalho redundante, não um bug.
 
-**Comportamento cumulativo entre múltiplos uploads.** O enunciado não aborda o que deve acontecer quando o usuário envia mais de um CSV — o exemplo mostra um arquivo só, e o endpoint `/metrics/aggregate` consulta "a métrica X no período Y", sem conceito de "upload ativo". Precisei decidir como tratar uploads subsequentes e optei por **acumulação com dedupe por `(metricId, dateTime)` — primeiro registro escrito prevalece**. Na prática: se você sobe um arquivo com 10 linhas e depois sobe o mesmo arquivo acrescido de 1 linha, o banco termina com 11 linhas (as 10 originais colidem no unique e são ignoradas, só a nova entra); se subir um segundo CSV do mesmo metricId com datas totalmente diferentes, o banco acumula o union dos dois; se as datas se sobrepõem com valores diferentes, os valores antigos permanecem (o reenvio não sobrescreve). Considerei as alternativas: (a) **substituir o range do upload** — deletar tudo do `(metricId, range do CSV)` antes de inserir; (b) **somar valores em colisão** — usar `ON CONFLICT DO UPDATE SET value = value + EXCLUDED.value`; (c) **atribuir cada upload a um "lote"** com id próprio e filtrar por lote na consulta. Todas têm casos de uso válidos, mas escolhi acumular porque é o comportamento padrão de sistemas de ingestão de séries temporais (InfluxDB, TimescaleDB, Prometheus): o banco é a fonte única da verdade, CSVs são deltas, e o aggregate reflete o estado total do banco. Isso também é o que torna o `ON CONFLICT DO NOTHING` idempotente de ponta a ponta — reupload acidental ou requeue do Rabbit não altera nada, o que é mais seguro do que "last-write-wins" em um pipeline assíncrono onde a ordem de processamento não é garantida. Deixo registrado porque entendo que, em um cenário real de produto, essa decisão mereceria ser validada com o time — talvez o usuário esperasse comportamento de "substituição" do último upload, e nesse caso a implementação seria diferente.
+**Um arquivo ativo por vez — substituição em duas fases (storage eager, banco lazy).** Depois da primeira rodada de teste, ficou claro que a acumulação silenciosa confundia o uso: "por que o gráfico mudou se eu subi um arquivo novo que cobria o mesmo período?". A semântica que faz sentido pro usuário é **um arquivo ativo por vez** — o sistema tem exatamente uma sessão de dados. Mas como a UI mostra a consulta anterior enquanto o novo upload está em pré-visualização/processando, a substituição não pode ser instantânea nos dois lados, senão o dado em tela ficaria desalinhado com os números do banco. Dividi em duas fases: **no upload, o Azurite é atualizado imediatamente** (delete do blob anterior + store do novo — o storage sempre tem exatamente 1 arquivo); **no banco, a substituição é lazy** — as linhas do upload anterior continuam vivas junto com as do novo, cada uma marcada com o `csv_upload_id` de origem. No próximo `GET /metrics/aggregate` ou `/metrics/report`, um `cleanupStaleUploads()` roda como pré-passo: encontra o upload mais recente (ativo), apaga linhas com `csv_upload_id` diferente e as próprias linhas antigas do `csv_uploads`. O usuário só vê os números do arquivo novo quando **ele manda consultar** — até lá, o banner "resultados desatualizados" já sinaliza a pendência. Como consequência, a unique do `metric_readings` virou `(metricId, dateTime, csv_upload_id)`: permite que o mesmo (metric, timestamp) coexista em dois uploads durante a janela entre upload e próxima consulta (sem essa coluna no unique, `ON CONFLICT DO NOTHING` do consumer ignoraria as linhas do arquivo novo quando colidissem com o antigo — a substituição quebraria). Linhas com `csv_upload_id IS NULL` (seed demo do metric 999) são tratadas como permanentes e nunca entram na limpeza. Consumer também foi blindado pros casos de corrida: se o blob foi substituído antes dele processar, ou se o registro correspondente em `csv_uploads` não existe mais, a mensagem é ack-ada com um warn e a fila não trava.
+
+**Logs do pipeline passo a passo.** Pra facilitar a inspeção visual de como o fluxo atravessa os serviços (API → Azurite → RabbitMQ → Consumer → Postgres), cada etapa tem um log com prefixo emoji identificando o ponto — `📥 upload recebido`, `🧮 hash computado`, `☁️  armazenado no Azurite`, `✅ dedup`, `🔁 substituicao` (quando tem blob anterior pra apagar), `💾 csv_uploads → registro salvo`, `📤 rabbitmq → mensagem publicada`, `📥 rabbitmq → mensagem consumida`, `🔗 vinculado ao upload`, `⬇️  baixando stream`, `📊 parse`, `📊 lote #N` (primeiro, décimo, depois a cada 25 pra não poluir com arquivos grandes), `✅ processamento concluido`, `🔎 aggregate`, `🧹 cleanup`, `📈 aggregate → N ponto(s)`. Basta `docker logs -f gy-api` durante um upload+consulta pra ver o fluxo completo com blob name, sha256 prefixo, upload_id, contagens e timings.
 
 **Relatório Excel com window functions (sem `GROUP BY`).** Detalhado na seção "Diário de bordo".
 
@@ -175,18 +177,18 @@ O upload é encaminhado via stream direto para o blob (a API não bufferiza o ar
 
 **113 testes no total**, divididos entre back e front.
 
-### Backend — 29 testes, 4 suítes
+### Backend — 32 testes, 4 suítes
 
 | Suíte | Tipo | Casos |
 |-------|------|-------|
 | `csv-parser.util.spec.ts` | Unit | 9 |
 | `hashing-stream.spec.ts` | Unit (SHA-256 pass-through) | 3 |
-| `metrics.repository.spec.ts` | Integração com Postgres real | 13 |
+| `metrics.repository.spec.ts` | Integração com Postgres real (insertBatch por upload, cleanupStaleUploads, aggregate, report) | 16 |
 | `pipeline.e2e.spec.ts` | E2E (AppModule + Rabbit + Azurite + DB) | 4 |
 
 Executar: `docker compose exec api npm test`.
 
-### Frontend — 94 testes, 7 suítes
+### Frontend — 96 testes, 7 suítes
 
 | Suíte | Foco | Casos |
 |-------|------|-------|
@@ -196,7 +198,7 @@ Executar: `docker compose exec api npm test`.
 | `theme.service.spec.ts` | Tema com localStorage + effect no DOM (default light, ignora prefers-color-scheme) | 6 |
 | `chart-export.service.spec.ts` | Register/unregister + batch export entre componentes | 6 |
 | `i18n.service.spec.ts` | Locale inicial, persistência, `t()` com params, fallback para pt, missing key | 12 |
-| `metrics.store.spec.ts` | Store central: computeds (total, kpis, histogram, weekdayMeans, isStale, isSubmittable), exceção metric 999, polling RxJS, upload preview, consultar (com pendingCsv e dedup), persistência + re-fetch | 50 |
+| `metrics.store.spec.ts` | Store central: computeds (total, kpis, histogram, weekdayMeans, isStale, isSubmittable), exceção metric 999, polling RxJS, upload preview, consultar (com pendingCsv e dedup), persistência + re-fetch | 52 |
 
 Executar: `docker compose exec frontend npm test`.
 

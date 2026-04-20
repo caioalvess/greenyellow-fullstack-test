@@ -3,6 +3,7 @@ import { Client } from 'pg';
 import { MetricReading } from './entities/metric-reading.entity';
 import { MetricsRepository } from './metrics.repository';
 import { Granularity } from './dto/aggregate-query.dto';
+import { CsvUpload } from '../uploads/entities/csv-upload.entity';
 
 const TEST_DB = 'gy_metrics_test';
 
@@ -35,7 +36,7 @@ function createTestDataSource(): DataSource {
     username: cfg.user,
     password: cfg.password,
     database: TEST_DB,
-    entities: [MetricReading],
+    entities: [MetricReading, CsvUpload],
     synchronize: true,
     dropSchema: true,
     logging: false,
@@ -72,33 +73,100 @@ describe('MetricsRepository (integracao real com Postgres)', () => {
 
   beforeEach(async () => {
     await ds.query('TRUNCATE metric_readings RESTART IDENTITY');
+    await ds.query('TRUNCATE csv_uploads CASCADE');
   });
+
+  async function insertUpload(sha: string, blobName: string, originalName: string): Promise<string> {
+    const rows = (await ds.query(
+      `INSERT INTO csv_uploads (sha256, blob_name, original_name, size)
+       VALUES ($1, $2, $3, 100) RETURNING id`,
+      [sha, blobName, originalName],
+    )) as Array<{ id: string }>;
+    return rows[0].id;
+  }
 
   describe('insertBatch', () => {
     it('insere em lote e retorna quantidade gravada', async () => {
-      const inserted = await repo.insertBatch([
-        { metricId: 1, dateTime: '2024-01-01 00:00:00', value: 1 },
-        { metricId: 1, dateTime: '2024-01-01 00:05:00', value: 0 },
-      ]);
+      const inserted = await repo.insertBatch(
+        [
+          { metricId: 1, dateTime: '2024-01-01 00:00:00', value: 1 },
+          { metricId: 1, dateTime: '2024-01-01 00:05:00', value: 0 },
+        ],
+        null,
+      );
       expect(inserted).toBe(2);
       expect(await repo.countAll()).toBe(2);
     });
 
-    it('ON CONFLICT ignora duplicatas no mesmo (metric_id, date_time)', async () => {
-      await repo.insertBatch([
-        { metricId: 1, dateTime: '2024-01-01 00:00:00', value: 1 },
-      ]);
-      const inserted2 = await repo.insertBatch([
-        { metricId: 1, dateTime: '2024-01-01 00:00:00', value: 99 },
-        { metricId: 1, dateTime: '2024-01-01 00:05:00', value: 1 },
-      ]);
+    it('ON CONFLICT ignora duplicatas no mesmo (metric_id, date_time, upload_id)', async () => {
+      const uploadId = await insertUpload('h1', 'blob-1', 'a.csv');
+      await repo.insertBatch(
+        [{ metricId: 1, dateTime: '2024-01-01 00:00:00', value: 1 }],
+        uploadId,
+      );
+      const inserted2 = await repo.insertBatch(
+        [
+          { metricId: 1, dateTime: '2024-01-01 00:00:00', value: 99 },
+          { metricId: 1, dateTime: '2024-01-01 00:05:00', value: 1 },
+        ],
+        uploadId,
+      );
       expect(inserted2).toBe(1); // so' a segunda linha entrou
       expect(await repo.countAll()).toBe(2);
     });
 
+    it('permite mesma (metric_id, date_time) em uploads DIFERENTES', async () => {
+      const u1 = await insertUpload('h1', 'blob-1', 'a.csv');
+      const u2 = await insertUpload('h2', 'blob-2', 'b.csv');
+      await repo.insertBatch(
+        [{ metricId: 1, dateTime: '2024-01-01 00:00:00', value: 1 }],
+        u1,
+      );
+      const inserted2 = await repo.insertBatch(
+        [{ metricId: 1, dateTime: '2024-01-01 00:00:00', value: 2 }],
+        u2,
+      );
+      expect(inserted2).toBe(1); // upload_id diferente, passa
+      expect(await repo.countAll()).toBe(2);
+    });
+
     it('retorna 0 para array vazio sem tocar o banco', async () => {
-      const inserted = await repo.insertBatch([]);
+      const inserted = await repo.insertBatch([], null);
       expect(inserted).toBe(0);
+    });
+  });
+
+  describe('cleanupStaleUploads', () => {
+    it('apaga uploads antigos e suas leituras, preserva o ativo e o seed (NULL)', async () => {
+      const uOld = await insertUpload('hold', 'blob-old', 'old.csv');
+      // uOld entra primeiro; um segundo upload "ativa" o novo por ser mais recente.
+      await ds.query(`SELECT pg_sleep(0.02)`);
+      const uNew = await insertUpload('hnew', 'blob-new', 'new.csv');
+      await repo.insertBatch(
+        [{ metricId: 1, dateTime: '2024-01-01 00:00:00', value: 10 }],
+        uOld,
+      );
+      await repo.insertBatch(
+        [{ metricId: 1, dateTime: '2024-01-02 00:00:00', value: 20 }],
+        uNew,
+      );
+      // Seed demo (NULL upload_id)
+      await seed(ds, [{ metric_id: 999, date_time: '2024-01-01 00:00:00', value: 7 }]);
+
+      const stats = await repo.cleanupStaleUploads();
+
+      expect(stats.deletedReadings).toBe(1);
+      expect(stats.deletedUploads).toBe(1);
+      expect(await repo.countAll()).toBe(2); // leitura do uNew + seed
+      const remaining = (await ds.query(
+        `SELECT original_name FROM csv_uploads ORDER BY uploaded_at`,
+      )) as Array<{ original_name: string }>;
+      expect(remaining).toEqual([{ original_name: 'new.csv' }]);
+    });
+
+    it('no-op quando nao ha nenhum upload', async () => {
+      const stats = await repo.cleanupStaleUploads();
+      expect(stats).toEqual({ deletedReadings: 0, deletedUploads: 0 });
     });
   });
 

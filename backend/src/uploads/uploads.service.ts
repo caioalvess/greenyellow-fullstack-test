@@ -20,6 +20,16 @@ export type UploadedMessage = {
 
 const PG_UNIQUE_VIOLATION = '23505';
 
+function shortHash(sha: string): string {
+  return sha.slice(0, 12);
+}
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / 1024 / 1024).toFixed(2)}MB`;
+}
+
 @Injectable()
 export class UploadsService {
   private readonly logger = new Logger(UploadsService.name);
@@ -33,20 +43,30 @@ export class UploadsService {
   ) {}
 
   /**
-   * O Multer + AzuriteStorageEngine ja' fez o streaming do arquivo pro blob
-   * e deixou o SHA-256 em `file.sha256`. Antes de enfileirar pro consumer,
-   * checamos se o hash ja' existe:
-   *   - existe → deletamos o blob recem-uploaded (rollback) e retornamos 409
-   *   - nao existe → gravamos no `csv_uploads` e publicamos pra fila
+   * Fluxo do POST /uploads, passo a passo:
    *
-   * Tratamos race condition (dois uploads simultaneos do mesmo conteudo)
-   * via try/catch do unique constraint na escrita. Isso mantem Azurite +
-   * Postgres consistentes: um arquivo so' fica persistido se o registro
-   * gravou com sucesso.
+   *  1. O multer + AzuriteStorageEngine ja' streamou o arquivo pro blob
+   *     e populou `file.sha256` via Sha256PassThrough.
+   *  2. Checamos se o hash ja' existe no `csv_uploads`. Se sim → 409,
+   *     deleta o blob recem-uploaded (rollback) e encerra.
+   *  3. Se nao: buscamos o upload ATIVO ATUAL. Se existir, apagamos o
+   *     blob dele do Azurite — o storage mantem no maximo 1 arquivo
+   *     por vez (requisito do sistema). A linha do csv_uploads antigo
+   *     fica viva ate o proximo /metrics/aggregate ou /metrics/report,
+   *     que entao limpa o stale junto com suas leituras (substituicao
+   *     tardia, "no ato da consulta").
+   *  4. Gravamos a nova linha em csv_uploads (idempotencia via unique
+   *     sha256 cobre corrida entre requests identicos).
+   *  5. Publicamos mensagem pra RabbitMQ pro consumer processar.
    */
   async handleUpload(file: Express.Multer.File): Promise<UploadedMessage> {
     const blobName = file.filename;
     const sha256 = file.sha256;
+    const sizeHuman = humanBytes(file.size);
+
+    this.logger.log(
+      `📥 upload recebido → ${file.originalname} (${sizeHuman})`,
+    );
 
     if (!sha256) {
       await this.azurite.deleteBlob(blobName);
@@ -55,32 +75,43 @@ export class UploadsService {
       );
     }
 
-    this.logger.log(
-      `Uploaded ${blobName} (${file.size} bytes, sha256=${sha256.slice(0, 12)}…)`,
-    );
+    this.logger.log(`🧮 hash computado → sha256=${shortHash(sha256)}…`);
+    this.logger.log(`☁️  armazenado no Azurite → blob=${blobName}`);
 
-    // Pre-check: rejeita rapido se o hash ja' e' conhecido.
-    const existing = await this.uploadsRepo.findOne({ where: { sha256 } });
-    if (existing) {
+    // 2) Dedup pre-check
+    const duplicate = await this.uploadsRepo.findOne({ where: { sha256 } });
+    if (duplicate) {
       await this.azurite.deleteBlob(blobName);
       this.logger.warn(
-        `Dedup: blob ${blobName} rejeitado — hash ja existe (${existing.originalName} @ ${existing.uploadedAt.toISOString()})`,
+        `🚫 dedup → blob descartado; hash ja existente em "${duplicate.originalName}" (${duplicate.uploadedAt.toISOString()})`,
       );
       throw new ConflictException({
         message: 'arquivo duplicado: conteudo identico ja foi enviado',
         existing: {
-          originalName: existing.originalName,
-          uploadedAt: existing.uploadedAt.toISOString(),
-          size: Number(existing.size),
+          originalName: duplicate.originalName,
+          uploadedAt: duplicate.uploadedAt.toISOString(),
+          size: Number(duplicate.size),
         },
       });
     }
+    this.logger.log(`✅ dedup → hash inedito, segue o fluxo`);
 
-    // Grava o registro. Se duas requisicoes com mesmo conteudo chegarem
-    // juntas e ambas passarem o pre-check, o unique constraint resolve:
-    // a primeira grava, a segunda leva 23505 e e' convertida em 409.
+    // 3) Substituicao no storage: o Azurite fica com no maximo 1 blob.
+    const previous = await this.uploadsRepo.findOne({
+      where: {},
+      order: { uploadedAt: 'DESC' },
+    });
+    if (previous) {
+      await this.azurite.deleteBlob(previous.blobName);
+      this.logger.log(
+        `🔁 substituicao → blob anterior removido do Azurite (${previous.originalName} → ${previous.blobName})`,
+      );
+    }
+
+    // 4) Grava o registro. Race resolvida pelo unique sha256 (23505 → 409).
+    let saved: CsvUpload;
     try {
-      await this.uploadsRepo.save(
+      saved = await this.uploadsRepo.save(
         this.uploadsRepo.create({
           sha256,
           blobName,
@@ -109,9 +140,11 @@ export class UploadsService {
       }
       throw err;
     }
+    this.logger.log(`💾 csv_uploads → registro salvo id=${saved.id}`);
 
     this.statusStore.register(blobName);
 
+    // 5) Enfileira pro consumer.
     const message: UploadedMessage = {
       blobName,
       originalName: file.originalname,
@@ -120,7 +153,9 @@ export class UploadsService {
     };
     const queue = this.rabbitmq.uploadQueue;
     this.rabbitmq.publish(queue, message);
-    this.logger.log(`Published ${blobName} to queue ${queue}`);
+    this.logger.log(
+      `📤 rabbitmq → mensagem publicada na fila "${queue}" (blob=${blobName})`,
+    );
 
     return message;
   }
